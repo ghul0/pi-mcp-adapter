@@ -19,7 +19,7 @@ import {
 import { McpServerManager } from "./server-manager.ts";
 import { buildToolMetadata, totalToolCount } from "./tool-metadata.ts";
 import { UiResourceHandler } from "./ui-resource-handler.ts";
-import { openUrl, parallelLimit } from "./utils.ts";
+import { getConfigPathsFromArgv, openUrl, parallelLimit } from "./utils.ts";
 import { logger } from "./logger.ts";
 import { getMissingConfiguredDirectToolServers } from "./direct-tools.ts";
 
@@ -33,8 +33,8 @@ export async function initializeMcp(
   pi: ExtensionAPI,
   ctx: ExtensionContext
 ): Promise<McpExtensionState> {
-  const configPath = pi.getFlag("mcp-config") as string | undefined;
-  const config = loadMcpConfig(configPath, ctx.cwd);
+  const configPaths = getConfigPathsFromArgv();
+  const config = loadMcpConfig(configPaths, ctx.cwd);
 
   const manager = new McpServerManager();
   const samplingAutoApprove = config.settings?.samplingAutoApprove === true;

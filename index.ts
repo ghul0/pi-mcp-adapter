@@ -7,7 +7,7 @@ import { buildProxyDescription, createDirectToolExecutor, getMissingConfiguredDi
 import { flushMetadataCache, initializeMcp, updateStatusBar } from "./init.ts";
 import { loadMetadataCache } from "./metadata-cache.ts";
 import { executeAuthComplete, executeAuthStart, executeCall, executeConnect, executeDescribe, executeList, executeSearch, executeStatus, executeUiMessages } from "./proxy-modes.ts";
-import { getConfigPathFromArgv, truncateAtWord } from "./utils.ts";
+import { getConfigPathsFromArgv, truncateAtWord } from "./utils.ts";
 import { initializeOAuth, shutdownOAuth } from "./mcp-auth-flow.ts";
 import { createMcpDirectToolCallRenderer, renderMcpProxyToolCall, renderMcpToolResult } from "./tool-result-renderer.ts";
 
@@ -46,8 +46,8 @@ export default function mcpAdapter(pi: ExtensionAPI) {
     }
   }
 
-  const earlyConfigPath = getConfigPathFromArgv();
-  const earlyConfig = loadMcpConfig(earlyConfigPath);
+  const earlyConfigPaths = getConfigPathsFromArgv();
+  const earlyConfig = loadMcpConfig(earlyConfigPaths);
   const earlyCache = loadMetadataCache();
   const prefix = earlyConfig.settings?.toolPrefix ?? "server";
 
@@ -82,7 +82,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
   const getPiTools = (): ToolInfo[] => pi.getAllTools();
 
   pi.registerFlag("mcp-config", {
-    description: "Path to MCP config file",
+    description: "Path(s) to MCP config file; can be repeated",
     type: "string",
   });
 
@@ -183,7 +183,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
           await showTools(state, ctx);
           break;
         case "setup": {
-          const result = await openMcpSetup(state, pi, ctx, earlyConfigPath, "setup");
+          const result = await openMcpSetup(state, pi, ctx, "setup");
           if (result?.configChanged) {
             await ctx.reload();
             return;
@@ -203,7 +203,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         case "":
         default:
           if (ctx.hasUI) {
-            const result = await openMcpPanel(state, pi, ctx, earlyConfigPath);
+            const result = await openMcpPanel(state, pi, ctx);
             if (result?.configChanged) {
               await ctx.reload();
               return;
@@ -239,7 +239,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       }
 
       if (!serverName) {
-        await openMcpAuthPanel(state, pi, ctx, earlyConfigPath);
+        await openMcpAuthPanel(state, pi, ctx, earlyConfigPaths);
         return;
       }
 

@@ -18,7 +18,7 @@ import { buildToolMetadata } from "./tool-metadata.ts";
 import { supportsOAuth, authenticate, removeAuth } from "./mcp-auth-flow.ts";
 import { getAuthForUrl } from "./mcp-auth.ts";
 import { loadOnboardingState, markSetupCompleted as persistSetupCompleted, markSharedConfigHintShown } from "./onboarding-state.ts";
-import { openPath } from "./utils.ts";
+import { getConfigPathsFromArgv, openPath } from "./utils.ts";
 
 export async function showStatus(state: McpExtensionState, ctx: ExtensionContext): Promise<void> {
   if (!ctx.hasUI) return;
@@ -217,8 +217,8 @@ export interface PanelFlowResult {
   configChanged: boolean;
 }
 
-function buildSharedConfigNoticeLines(configOverridePath: string | undefined, cwd: string): { lines: string[]; fingerprint: string | null } {
-  const discovery = getMcpDiscoverySummary(configOverridePath, cwd);
+function buildSharedConfigNoticeLines(configPaths: string[] | undefined, cwd: string): { lines: string[]; fingerprint: string | null } {
+  const discovery = getMcpDiscoverySummary(configPaths, cwd);
   const onboardingState = loadOnboardingState();
   if (!discovery.hasSharedServers || onboardingState.sharedConfigHintShown) {
     return { lines: [], fingerprint: null };
@@ -239,26 +239,27 @@ export async function openMcpSetup(
   _state: McpExtensionState,
   pi: ExtensionAPI,
   ctx: ExtensionContext,
-  configOverridePath?: string,
   mode: "empty" | "setup" = "setup",
 ): Promise<PanelFlowResult> {
   if (!ctx.hasUI) return { configChanged: false };
 
-  const discovery = getMcpDiscoverySummary(configOverridePath, ctx.cwd);
+  const configPaths = getConfigPathsFromArgv();
+  const configPath = configPaths?.[0];
+  const discovery = getMcpDiscoverySummary(configPaths, ctx.cwd);
   const onboardingState = loadOnboardingState();
   const { createMcpSetupPanel } = await import("./mcp-setup-panel.ts");
   let configChanged = false;
 
   const callbacks = {
-    previewImports: (imports: ImportKind[]) => previewCompatibilityImports(imports, configOverridePath),
+    previewImports: (imports: ImportKind[]) => previewCompatibilityImports(imports, configPath),
     previewStarterProject: () => previewStarterProjectConfig(ctx.cwd),
     previewRepoPrompt: () => {
-      const repoPrompt = getMcpDiscoverySummary(configOverridePath, ctx.cwd).repoPrompt;
+      const repoPrompt = getMcpDiscoverySummary(configPaths, ctx.cwd).repoPrompt;
       if (!repoPrompt.entry || !repoPrompt.targetPath || !repoPrompt.serverName) return null;
       return previewSharedServerEntry(repoPrompt.targetPath, repoPrompt.serverName, repoPrompt.entry);
     },
     adoptImports: async (imports: ImportKind[]) => {
-      const result = ensureCompatibilityImports(imports, configOverridePath);
+      const result = ensureCompatibilityImports(imports, configPath);
       if (result.added.length > 0) configChanged = true;
       return result;
     },
@@ -268,7 +269,7 @@ export async function openMcpSetup(
       return { path };
     },
     addRepoPrompt: async () => {
-      const repoPrompt = getMcpDiscoverySummary(configOverridePath, ctx.cwd).repoPrompt;
+      const repoPrompt = getMcpDiscoverySummary(configPaths, ctx.cwd).repoPrompt;
       if (!repoPrompt.entry || !repoPrompt.targetPath || !repoPrompt.serverName) {
         throw new Error("RepoPrompt is not available to add from this setup screen.");
       }
@@ -339,17 +340,16 @@ export async function openMcpPanel(
   state: McpExtensionState,
   pi: ExtensionAPI,
   ctx: ExtensionContext,
-  configOverridePath?: string,
 ): Promise<PanelFlowResult> {
+  const configPaths = getConfigPathsFromArgv();
   if (Object.keys(state.config.mcpServers).length === 0) {
-    return openMcpSetup(state, pi, ctx, configOverridePath, "empty");
+    return openMcpSetup(state, pi, ctx, "empty");
   }
 
   const config = state.config;
   const cache = loadMetadataCache();
-  const configPath = pi.getFlag("mcp-config") as string | undefined ?? configOverridePath;
-  const provenanceMap = getServerProvenance(configPath, ctx.cwd);
-  const { lines: noticeLines, fingerprint } = buildSharedConfigNoticeLines(configPath, ctx.cwd);
+  const provenanceMap = getServerProvenance(configPaths, ctx.cwd);
+  const { lines: noticeLines, fingerprint } = buildSharedConfigNoticeLines(configPaths, ctx.cwd);
 
   const callbacks = buildMcpPanelCallbacks(state, config, ctx);
 
@@ -382,9 +382,9 @@ export async function openMcpPanel(
 
 export async function openMcpAuthPanel(
   state: McpExtensionState,
-  pi: ExtensionAPI,
+  _pi: ExtensionAPI,
   ctx: ExtensionContext,
-  configOverridePath?: string,
+  configOverridePaths?: string | string[],
 ): Promise<PanelFlowResult> {
   if (!ctx.hasUI) return { configChanged: false };
 
@@ -396,8 +396,8 @@ export async function openMcpAuthPanel(
   }
 
   const cache = loadMetadataCache();
-  const configPath = pi.getFlag("mcp-config") as string | undefined ?? configOverridePath;
-  const provenanceMap = getServerProvenance(configPath, ctx.cwd);
+  const configPaths = getConfigPathsFromArgv() ?? (Array.isArray(configOverridePaths) ? configOverridePaths : configOverridePaths ? [configOverridePaths] : undefined);
+  const provenanceMap = getServerProvenance(configPaths, ctx.cwd);
   const callbacks = buildMcpPanelCallbacks(state, config, ctx);
   const { createMcpPanel } = await import("./mcp-panel.ts");
 
