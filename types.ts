@@ -1,3 +1,5 @@
+import type { ServerPolicy } from "./policy.js";
+
 // types.ts - Core type definitions
 import type { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
@@ -309,6 +311,8 @@ export interface ServerEntry {
   excludeTools?: string[];
   // Debug
   debug?: boolean;  // Show server stderr (default: false)
+  // Policy
+  policy?: ServerPolicy;
 }
 
 // Settings
