@@ -25,7 +25,7 @@ const mocks = vi.hoisted(() => ({
   executeSearch: vi.fn(),
   executeStatus: vi.fn(),
   executeUiMessages: vi.fn(),
-  getConfigPathFromArgv: vi.fn(() => undefined),
+  getConfigPathsFromArgv: vi.fn(() => undefined),
   truncateAtWord: vi.fn((text: string) => text),
 }));
 
@@ -75,7 +75,7 @@ vi.mock("../proxy-modes.js", () => ({
 }));
 
 vi.mock("../utils.js", () => ({
-  getConfigPathFromArgv: mocks.getConfigPathFromArgv,
+  getConfigPathsFromArgv: mocks.getConfigPathsFromArgv,
   truncateAtWord: mocks.truncateAtWord,
 }));
 
@@ -138,7 +138,7 @@ describe("mcpAdapter session lifecycle", () => {
     mocks.createDirectToolExecutor.mockReturnValue(vi.fn());
     mocks.getMissingConfiguredDirectToolServers.mockReturnValue([]);
     mocks.resolveDirectTools.mockReturnValue([]);
-    mocks.getConfigPathFromArgv.mockReturnValue(undefined);
+    mocks.getConfigPathsFromArgv.mockReturnValue(undefined);
     mocks.truncateAtWord.mockImplementation((text: string) => text);
   });
 
@@ -279,7 +279,7 @@ describe("mcpAdapter session lifecycle", () => {
 
     await commandDef.handler("setup", { hasUI: true, ui: { notify: vi.fn() } });
 
-    expect(mocks.openMcpSetup).toHaveBeenCalledWith(state, api, expect.any(Object), undefined, "setup");
+    expect(mocks.openMcpSetup).toHaveBeenCalledWith(state, api, expect.any(Object), "setup");
   });
 
   it("triggers core reload after setup changes config", async () => {

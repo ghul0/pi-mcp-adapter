@@ -51,12 +51,39 @@ export async function parallelLimit<T, R>(
   return results;
 }
 
-export function getConfigPathFromArgv(): string | undefined {
-  const idx = process.argv.indexOf("--mcp-config");
-  if (idx >= 0 && idx + 1 < process.argv.length) {
-    return process.argv[idx + 1];
+export function parseConfigFlag(flag: unknown): string[] | undefined {
+  if (typeof flag !== "string") return undefined;
+
+  const trimmed = flag.trim();
+  if (!trimmed) return undefined;
+
+  const resolved = resolveConfigPath(trimmed);
+  return resolved ? [resolved] : undefined;
+}
+
+export function getConfigPathsFromArgv(): string[] | undefined {
+  const paths: string[] = [];
+
+  for (let i = 0; i < process.argv.length; i++) {
+    if (process.argv[i] !== "--mcp-config") continue;
+
+    for (let j = i + 1; j < process.argv.length; j++) {
+      const value = process.argv[j];
+      if (value.startsWith("--")) {
+        i = j - 1;
+        break;
+      }
+      const resolved = resolveConfigPath(value);
+      if (resolved) paths.push(resolved);
+      i = j;
+    }
   }
-  return undefined;
+
+  return paths.length > 0 ? paths : undefined;
+}
+
+export function getConfigPathFromArgv(): string | undefined {
+  return getConfigPathsFromArgv()?.[0];
 }
 
 export function interpolateEnvVars(value: string): string {

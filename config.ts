@@ -180,16 +180,84 @@ export function getMcpDiscoverySummary(overridePath?: string, cwd = process.cwd(
   };
 }
 
-export function loadMcpConfig(overridePath?: string): McpConfig {
+export function loadMcpConfig(overridePaths?: string | string[]): McpConfig {
   let config: McpConfig = { mcpServers: {} };
 
-  for (const source of getConfigSources(overridePath)) {
+  for (const source of getConfigSourcesForPaths(normalizeOverridePaths(overridePaths))) {
     const loaded = readValidatedConfig(source.readPath, `MCP config from ${source.readPath}`);
     if (!loaded) continue;
     config = mergeConfigs(config, expandImports(loaded));
   }
 
   return config;
+}
+
+function normalizeOverridePaths(input: string | string[] | undefined): string[] | undefined {
+  if (input === undefined) return undefined;
+  if (typeof input === "string") return [input];
+  return input.length > 0 ? input : undefined;
+}
+
+function getConfigSourcesForPaths(overridePaths: string[] | undefined, cwd = process.cwd()): ConfigSourceSpec[] {
+  if (!overridePaths || overridePaths.length <= 1) {
+    return getConfigSources(overridePaths?.[0], cwd);
+  }
+
+  const userPaths = overridePaths.map((p) => getPiGlobalConfigPath(p));
+  const projectPath = getProjectConfigPath(cwd);
+  const projectPiPath = getProjectPiConfigPath(cwd);
+  const sources: ConfigSourceSpec[] = [];
+
+  if (!userPaths.includes(GENERIC_GLOBAL_CONFIG_PATH)) {
+    sources.push({
+      id: "shared-global",
+      label: "user-global standard MCP",
+      readPath: GENERIC_GLOBAL_CONFIG_PATH,
+      writePath: userPaths[userPaths.length - 1],
+      kind: "import",
+      importKind: "global MCP config",
+      shared: true,
+      scope: "global",
+    });
+  }
+
+  for (const userPath of userPaths) {
+    sources.push({
+      id: "pi-global",
+      label: "Pi global override",
+      readPath: userPath,
+      writePath: userPath,
+      kind: "user",
+      shared: false,
+      scope: "global",
+    });
+  }
+
+  if (!userPaths.includes(projectPath)) {
+    sources.push({
+      id: "shared-project",
+      label: "project standard MCP",
+      readPath: projectPath,
+      writePath: projectPath,
+      kind: "project",
+      shared: true,
+      scope: "project",
+    });
+  }
+
+  if (!userPaths.includes(projectPiPath) && projectPiPath !== projectPath) {
+    sources.push({
+      id: "pi-project",
+      label: "project Pi override",
+      readPath: projectPiPath,
+      writePath: projectPiPath,
+      kind: "project",
+      shared: false,
+      scope: "project",
+    });
+  }
+
+  return sources;
 }
 
 function getConfigSources(overridePath?: string, cwd = process.cwd()): ConfigSourceSpec[] {
@@ -591,11 +659,13 @@ export function writeSharedServerEntry(filePath: string, serverName: string, ent
   return filePath;
 }
 
-export function getServerProvenance(overridePath?: string): Map<string, ServerProvenance> {
+export function getServerProvenance(overridePaths?: string | string[]): Map<string, ServerProvenance> {
   const provenance = new Map<string, ServerProvenance>();
-  const userPath = getPiGlobalConfigPath(overridePath);
+  const normalized = normalizeOverridePaths(overridePaths);
+  const userPaths = (normalized ?? [undefined]).map((p) => getPiGlobalConfigPath(p));
+  const importTargetPath = userPaths[userPaths.length - 1];
 
-  for (const source of getConfigSources(overridePath)) {
+  for (const source of getConfigSourcesForPaths(normalized)) {
     const loaded = readValidatedConfig(source.readPath, `MCP config from ${source.readPath}`);
     if (!loaded) continue;
 
@@ -609,7 +679,7 @@ export function getServerProvenance(overridePath?: string): Map<string, ServerPr
           const servers = extractServers(imported, importKind);
           for (const name of Object.keys(servers)) {
             if (!provenance.has(name)) {
-              provenance.set(name, { path: userPath, kind: "import", importKind });
+              provenance.set(name, { path: importTargetPath, kind: "import", importKind });
             }
           }
         } catch {}

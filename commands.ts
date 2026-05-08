@@ -18,7 +18,7 @@ import { buildToolMetadata } from "./tool-metadata.js";
 import { supportsOAuth, authenticate } from "./mcp-auth-flow.js";
 import { hasStoredTokens } from "./mcp-auth.js";
 import { loadOnboardingState, markSetupCompleted as persistSetupCompleted, markSharedConfigHintShown } from "./onboarding-state.js";
-import { openPath } from "./utils.js";
+import { getConfigPathsFromArgv, openPath } from "./utils.js";
 
 export async function showStatus(state: McpExtensionState, ctx: ExtensionContext): Promise<void> {
   if (!ctx.hasUI) return;
@@ -194,8 +194,9 @@ export interface PanelFlowResult {
   configChanged: boolean;
 }
 
-function buildSharedConfigNoticeLines(configOverridePath?: string): { lines: string[]; fingerprint: string | null } {
-  const discovery = getMcpDiscoverySummary(configOverridePath);
+function buildSharedConfigNoticeLines(): { lines: string[]; fingerprint: string | null } {
+  const configPath = getConfigPathsFromArgv()?.[0];
+  const discovery = getMcpDiscoverySummary(configPath);
   const onboardingState = loadOnboardingState();
   if (!discovery.hasSharedServers || onboardingState.sharedConfigHintShown) {
     return { lines: [], fingerprint: null };
@@ -216,26 +217,26 @@ export async function openMcpSetup(
   _state: McpExtensionState,
   pi: ExtensionAPI,
   ctx: ExtensionContext,
-  configOverridePath?: string,
   mode: "empty" | "setup" = "setup",
 ): Promise<PanelFlowResult> {
   if (!ctx.hasUI) return { configChanged: false };
 
-  const discovery = getMcpDiscoverySummary(configOverridePath);
+  const configPath = getConfigPathsFromArgv()?.[0];
+  const discovery = getMcpDiscoverySummary(configPath);
   const onboardingState = loadOnboardingState();
   const { createMcpSetupPanel } = await import("./mcp-setup-panel.js");
   let configChanged = false;
 
   const callbacks = {
-    previewImports: (imports: ImportKind[]) => previewCompatibilityImports(imports, configOverridePath),
+    previewImports: (imports: ImportKind[]) => previewCompatibilityImports(imports, configPath),
     previewStarterProject: () => previewStarterProjectConfig(),
     previewRepoPrompt: () => {
-      const repoPrompt = getMcpDiscoverySummary(configOverridePath).repoPrompt;
+      const repoPrompt = getMcpDiscoverySummary(configPath).repoPrompt;
       if (!repoPrompt.entry || !repoPrompt.targetPath || !repoPrompt.serverName) return null;
       return previewSharedServerEntry(repoPrompt.targetPath, repoPrompt.serverName, repoPrompt.entry);
     },
     adoptImports: async (imports: ImportKind[]) => {
-      const result = ensureCompatibilityImports(imports, configOverridePath);
+      const result = ensureCompatibilityImports(imports, configPath);
       if (result.added.length > 0) configChanged = true;
       return result;
     },
@@ -245,7 +246,7 @@ export async function openMcpSetup(
       return { path };
     },
     addRepoPrompt: async () => {
-      const repoPrompt = getMcpDiscoverySummary(configOverridePath).repoPrompt;
+      const repoPrompt = getMcpDiscoverySummary(configPath).repoPrompt;
       if (!repoPrompt.entry || !repoPrompt.targetPath || !repoPrompt.serverName) {
         throw new Error("RepoPrompt is not available to add from this setup screen.");
       }
@@ -278,16 +279,16 @@ export async function openMcpPanel(
   state: McpExtensionState,
   pi: ExtensionAPI,
   ctx: ExtensionContext,
-  configOverridePath?: string,
 ): Promise<PanelFlowResult> {
+  const configPaths = getConfigPathsFromArgv();
   if (Object.keys(state.config.mcpServers).length === 0) {
-    return openMcpSetup(state, pi, ctx, configOverridePath, "empty");
+    return openMcpSetup(state, pi, ctx, "empty");
   }
 
   const config = state.config;
   const cache = loadMetadataCache();
-  const provenanceMap = getServerProvenance(pi.getFlag("mcp-config") as string | undefined ?? configOverridePath);
-  const { lines: noticeLines, fingerprint } = buildSharedConfigNoticeLines(pi.getFlag("mcp-config") as string | undefined ?? configOverridePath);
+  const provenanceMap = getServerProvenance(configPaths);
+  const { lines: noticeLines, fingerprint } = buildSharedConfigNoticeLines();
 
   const callbacks: McpPanelCallbacks = {
     reconnect: async (serverName: string) => {
