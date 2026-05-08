@@ -1,9 +1,41 @@
 import { getToolUiResourceUri } from "@modelcontextprotocol/ext-apps/app-bridge";
+import { filterAllowedTools, filterAllowedResources } from "./policy.ts";
+import type { ServerPolicy } from "./policy.ts";
 import type { McpExtensionState } from "./state.ts";
 import type { ToolMetadata, McpTool, McpResource, ServerEntry } from "./types.ts";
 import { formatToolName, isToolExcluded } from "./types.ts";
 import { resourceNameToToolName } from "./resource-tools.ts";
 import { extractToolUiStreamMode } from "./utils.ts";
+
+export function checkPolicyAllowlistWarnings(
+  policy: ServerPolicy,
+  tools: Array<{ name: string }>,
+  resources: Array<{ uri: string }>,
+  prompts: Array<{ name: string }> | undefined,
+  serverName: string
+): void {
+  const toolNames = new Set(tools.map(t => t.name));
+  const resourceUris = new Set(resources.map(r => r.uri));
+
+  for (const name of policy.allowedTools ?? []) {
+    if (!toolNames.has(name)) {
+      console.warn(`MCP [${serverName}]: allowedTools entry "${name}" not found on server`);
+    }
+  }
+  for (const uri of policy.allowedResources ?? []) {
+    if (!resourceUris.has(uri)) {
+      console.warn(`MCP [${serverName}]: allowedResources entry "${uri}" not found on server`);
+    }
+  }
+  if (prompts !== undefined) {
+    const promptNames = new Set(prompts.map(p => p.name));
+    for (const name of policy.allowedPrompts ?? []) {
+      if (!promptNames.has(name)) {
+        console.warn(`MCP [${serverName}]: allowedPrompts entry "${name}" not found on server`);
+      }
+    }
+  }
+}
 
 export function buildToolMetadata(
   tools: McpTool[],
@@ -15,7 +47,13 @@ export function buildToolMetadata(
   const metadata: ToolMetadata[] = [];
   const failedTools: string[] = [];
 
-  for (const tool of tools) {
+  const filteredTools = definition.policy ? filterAllowedTools(definition.policy, tools) : tools;
+  if (definition.policy) {
+    checkPolicyAllowlistWarnings(definition.policy, tools, resources, undefined, serverName);
+  }
+  const filteredResources = definition.policy ? filterAllowedResources(definition.policy, resources) : resources;
+
+  for (const tool of filteredTools) {
     if (!tool?.name) {
       failedTools.push("(unnamed)");
       continue;
@@ -41,7 +79,7 @@ export function buildToolMetadata(
   }
 
   if (definition.exposeResources !== false) {
-    for (const resource of resources) {
+    for (const resource of filteredResources) {
       const baseName = `get_${resourceNameToToolName(resource.name)}`;
       if (isToolExcluded(baseName, serverName, prefix, definition.excludeTools)) {
         continue;

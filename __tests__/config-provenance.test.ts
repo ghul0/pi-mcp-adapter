@@ -13,7 +13,7 @@ vi.mock("node:fs", () => ({
   renameSync: vi.fn(),
 }));
 
-import { getServerProvenance } from "../config.js";
+import { getServerProvenance } from "../config.ts";
 
 describe("getServerProvenance multi-file provenance", () => {
   const originalWarn = console.warn;

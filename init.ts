@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { McpExtensionState } from "./state.ts";
 import type { ToolMetadata } from "./types.ts";
 import { existsSync } from "node:fs";
-import { loadMcpConfig } from "./config.ts";
+import { loadMcpConfig, validatePoliciesInConfig } from "./config.ts";
 import { ConsentManager } from "./consent-manager.ts";
 import { McpLifecycleManager } from "./lifecycle.ts";
 import {
@@ -35,6 +35,7 @@ export async function initializeMcp(
 ): Promise<McpExtensionState> {
   const configPaths = getConfigPathsFromArgv();
   const config = loadMcpConfig(configPaths, ctx.cwd);
+  validatePoliciesInConfig(config);
 
   const manager = new McpServerManager();
   const samplingAutoApprove = config.settings?.samplingAutoApprove === true;

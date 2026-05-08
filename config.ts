@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { getAgentPath } from "./agent-dir.ts";
 import type { McpConfig, ServerEntry, McpSettings, ImportKind, ServerProvenance } from "./types.ts";
+import { validateServerPolicy, type ToolPolicy } from "./policy.ts";
 
 const GENERIC_GLOBAL_CONFIG_PATH = join(homedir(), ".config", "mcp", "mcp.json");
 const PROJECT_CONFIG_NAME = ".mcp.json";
@@ -732,5 +733,40 @@ export function writeDirectToolsConfig(
 
     setServersObject(raw, servers);
     writeRawConfigObject(filePath, raw);
+  }
+}
+
+export function validatePoliciesInConfig(config: McpConfig): void {
+  for (const [, definition] of Object.entries(config.mcpServers)) {
+    if (!definition.policy) continue;
+
+    validateServerPolicy(definition.policy);
+    validateInlineToolPolicy(definition.policy as ToolPolicy);
+  }
+}
+
+function validateInlineToolPolicy(policy: ToolPolicy): void {
+  for (const key of policy.forbidKeys ?? []) {
+    if (policy.requireKeys?.includes(key)) {
+      throw new Error(`"${key}" is in both forbidKeys and requireKeys`);
+    }
+  }
+
+  for (const key of policy.forbidPerItemKeys ?? []) {
+    if (policy.requirePerItemKeys?.includes(key)) {
+      throw new Error(`"${key}" is in both forbidPerItemKeys and requirePerItemKeys`);
+    }
+  }
+
+  for (const key of Object.keys(policy.defaults ?? {})) {
+    if (policy.forbidKeys?.includes(key)) {
+      throw new Error(`"${key}" is in both defaults and forbidKeys`);
+    }
+  }
+
+  for (const key of Object.keys(policy.injectIntoEachItem ?? {})) {
+    if (policy.forbidPerItemKeys?.includes(key)) {
+      throw new Error(`"${key}" is in both injectIntoEachItem and forbidPerItemKeys`);
+    }
   }
 }

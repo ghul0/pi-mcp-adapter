@@ -97,6 +97,7 @@ export function computeServerHash(definition: ServerEntry): string {
     bearerTokenEnv: definition.bearerTokenEnv,
     exposeResources: definition.exposeResources,
     excludeTools: definition.excludeTools,
+    policy: definition.policy,
   };
   const normalized = stableStringify(identity);
   return createHash("sha256").update(normalized).digest("hex");

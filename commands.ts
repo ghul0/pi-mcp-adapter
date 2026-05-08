@@ -384,7 +384,7 @@ export async function openMcpAuthPanel(
   state: McpExtensionState,
   _pi: ExtensionAPI,
   ctx: ExtensionContext,
-  configOverridePaths?: string | string[],
+  fallbackConfigPaths?: string | string[],
 ): Promise<PanelFlowResult> {
   if (!ctx.hasUI) return { configChanged: false };
 
@@ -396,7 +396,7 @@ export async function openMcpAuthPanel(
   }
 
   const cache = loadMetadataCache();
-  const configPaths = getConfigPathsFromArgv() ?? (Array.isArray(configOverridePaths) ? configOverridePaths : configOverridePaths ? [configOverridePaths] : undefined);
+  const configPaths = getConfigPathsFromArgv() ?? (Array.isArray(fallbackConfigPaths) ? fallbackConfigPaths : fallbackConfigPaths ? [fallbackConfigPaths] : undefined);
   const provenanceMap = getServerProvenance(configPaths, ctx.cwd);
   const callbacks = buildMcpPanelCallbacks(state, config, ctx);
   const { createMcpPanel } = await import("./mcp-panel.ts");

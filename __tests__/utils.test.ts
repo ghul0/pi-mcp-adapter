@@ -1,6 +1,6 @@
 import os from "node:os";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { getConfigPathFromArgv, getConfigPathsFromArgv, parseConfigFlag } from "../utils.js";
+import { getConfigPathFromArgv, getConfigPathsFromArgv, parseConfigFlag } from "../utils.ts";
 
 describe("config path parsing", () => {
   const originalArgv = process.argv;

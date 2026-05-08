@@ -14,7 +14,7 @@ vi.mock("node:fs", () => ({
 }));
 
 import { resolve } from "node:path";
-import { loadMcpConfig } from "../config.js";
+import { loadMcpConfig } from "../config.ts";
 
 const projectConfigPath = resolve(process.cwd(), ".mcp.json");
 
