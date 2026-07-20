@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-07-03
+
+### Changed
+- Restored the tracked npm lockfile for reproducible installs and downstream packaging. Thanks @fmoda3 for issue #71.
+
+### Added
+- Added default-on MCP output guarding with temp-file spillover for oversized text results, compact summaries for large proxy result details, and `settings.outputGuard` tuning. Thanks @tmustier for PR #160.
+
+### Fixed
+- Defaulted stdio MCP servers without an explicit `cwd` to the Pi session cwd so relative server output lands in the workspace. Thanks @TimoFreiberg for PR #152.
+- Kept multiline/control MCP panel metadata from corrupting rows and made Keep & Close save dirty changes. Thanks @gpmarques for issue/PR #14, @Vahor for issue #115, and @markokocic for issue #134/PR #135.
+- Preserved `--` separators when resolving `npx` wrapper commands so subcommand flags are not consumed by tools like `dotenv-cli`. Thanks @sherif-fanous for issue #15.
+- Merged partial per-server Pi overrides into imported MCP server definitions instead of replacing the full server entry. Thanks @cfbraun for issue #94.
+- Fixed the `pi-mcp-adapter` bin entrypoint when invoked through installed symlinks, so `init` runs instead of silently exiting. Thanks @cfbraun for issue #95.
+- Normalized direct MCP tool schemas so draft metadata and strict top-level additional properties do not break Pi registration. Thanks @marchellodev for issue #2/PR #3 and @comtihon for PR #144.
+- Routed interactive `/mcp-auth` OAuth URLs through Pi UI notifications so long authorization links remain intact instead of being truncated by raw terminal output. Thanks @feoh for issue #147/PR #148.
+- Respected configured HTTP headers before implicit OAuth auto-detection so API-key/custom-header MCP servers do not trigger OAuth DCR. Thanks @OnlyXianzo for issue #158.
+- Propagated Pi abort signals into MCP connect, resource, and tool requests so cancelled calls settle promptly. Thanks @xz-dev for PR #159.
+- Re-flagged failed MCP tool calls (`tool_error`/`call_failed`) as errors so they are recorded as failures (`isError: true`) instead of successes. Thanks @ishinder for PR #157.
+- Honored configured `requestTimeoutMs` during MCP connection, discovery, tool, resource, and UI proxy requests. Thanks @mizuikki for PR #155.
+- Rendered successful MCP `structuredContent` when servers return it without `content`. Thanks @dovixman for PR #146.
+
 ## [2.10.0] - 2026-06-13
 
 ### Added

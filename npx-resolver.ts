@@ -107,16 +107,18 @@ function parseNpxArgs(args: string[]): ParsedInvocation | null {
     foundFirstPositional = true;
   }
 
+  const separatedAfter = separatorIndex >= 0 && after.length > 0 ? ["--", ...after] : after;
+
   if (sawPackageFlag) {
     const binName = positionals[0];
     if (!packageSpec || !binName) return null;
-    const extraArgs = positionals.slice(1).concat(after);
+    const extraArgs = positionals.slice(1).concat(separatedAfter);
     return { packageSpec, binName, extraArgs };
   }
 
   const packagePositional = positionals[0];
   if (!packagePositional) return null;
-  const extraArgs = positionals.slice(1).concat(after);
+  const extraArgs = positionals.slice(1).concat(separatedAfter);
   return { packageSpec: packagePositional, extraArgs };
 }
 

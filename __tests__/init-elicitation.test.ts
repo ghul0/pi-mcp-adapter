@@ -18,6 +18,7 @@ vi.mock("../config.ts", async importOriginal => ({
 
 vi.mock("../server-manager.ts", () => ({
   McpServerManager: vi.fn().mockImplementation(function (this: any) {
+    this.setDefaultRequestTimeoutMs = vi.fn();
     this.setSamplingConfig = vi.fn();
     this.setElicitationConfig = vi.fn();
     this.getConnection = vi.fn();
@@ -51,10 +52,12 @@ describe("initializeMcp elicitation config", () => {
 
   it("enables form and URL elicitation in TUI mode", async () => {
     const { initializeMcp } = await import("../init.ts");
+    const { McpServerManager } = await import("../server-manager.ts");
     const ctx = context();
 
     await initializeMcp(extensionApi(), ctx);
 
+    expect(McpServerManager).toHaveBeenCalledWith(ctx.cwd);
     expect(mocks.managers[0].setElicitationConfig).toHaveBeenCalledWith({
       ui: ctx.ui,
       allowUrl: true,

@@ -23,20 +23,25 @@ type HttpTransportMock = {
 };
 
 const mocks = vi.hoisted(() => ({
+  clients: [] as any[],
   httpTransports: [] as HttpTransportMock[],
 }));
 
 vi.mock("@modelcontextprotocol/sdk/client/index.js", () => ({
-  Client: vi.fn().mockImplementation((info: unknown, options: unknown) => ({
-    info,
-    options,
-    setRequestHandler: vi.fn(),
-    setNotificationHandler: vi.fn(),
-    connect: vi.fn(async () => undefined),
-    listTools: vi.fn(async () => ({ tools: [] })),
-    listResources: vi.fn(async () => ({ resources: [] })),
-    close: vi.fn(async () => undefined),
-  })),
+  Client: vi.fn().mockImplementation((info: unknown, options: unknown) => {
+    const client = {
+      info,
+      options,
+      setRequestHandler: vi.fn(),
+      setNotificationHandler: vi.fn(),
+      connect: vi.fn(async () => undefined),
+      listTools: vi.fn(async () => ({ tools: [] })),
+      listResources: vi.fn(async () => ({ resources: [] })),
+      close: vi.fn(async () => undefined),
+    };
+    mocks.clients.push(client);
+    return client;
+  }),
 }));
 
 vi.mock("@modelcontextprotocol/sdk/client/stdio.js", () => ({
@@ -66,6 +71,7 @@ describe("McpServerManager HTTP bearer auth", () => {
   };
 
   beforeEach(() => {
+    mocks.clients.length = 0;
     mocks.httpTransports.length = 0;
   });
 
@@ -121,6 +127,19 @@ describe("McpServerManager HTTP bearer auth", () => {
     expect(mocks.httpTransports.at(-1)!.options.requestInit?.headers?.Authorization).toBe("Bearer named-env-token");
   });
 
+  it("uses configured headers without implicit OAuth", async () => {
+    const { McpServerManager } = await import("../server-manager.ts");
+
+    const manager = new McpServerManager();
+    await manager.connect("remote", {
+      url: "https://example.test/mcp",
+      headers: { "X-Goog-Api-Key": "api-key" },
+    });
+
+    expect(mocks.httpTransports.at(-1)!.options.requestInit?.headers?.["X-Goog-Api-Key"]).toBe("api-key");
+    expect(mocks.httpTransports.at(-1)!.options.authProvider).toBeUndefined();
+  });
+
   it("preserves OAuth redirect URI and client metadata for HTTP transports", async () => {
     const { McpServerManager } = await import("../server-manager.ts");
 
@@ -140,5 +159,19 @@ describe("McpServerManager HTTP bearer auth", () => {
     expect(authProvider?.clientMetadata?.redirect_uris).toEqual(["http://127.0.0.1:3118/callback"]);
     expect(authProvider?.clientMetadata?.client_name).toBe("Custom MCP");
     expect(authProvider?.clientMetadata?.client_uri).toBe("https://example.com/custom-mcp");
+  });
+
+  it("applies the configured timeout to the HTTP probe connect", async () => {
+    const { McpServerManager } = await import("../server-manager.ts");
+
+    const manager = new McpServerManager();
+    manager.setDefaultRequestTimeoutMs(2500);
+    await manager.connect("remote", {
+      url: "https://example.test/mcp",
+      requestTimeoutMs: 5000,
+    });
+
+    expect(mocks.clients[1].connect).toHaveBeenCalledWith(mocks.httpTransports[0], { timeout: 5000 });
+    expect(mocks.clients[0].connect).toHaveBeenCalledWith(mocks.httpTransports[1], { timeout: 5000 });
   });
 });

@@ -98,6 +98,34 @@ describe("mcp-panel auth actions", () => {
     panel.dispose();
   });
 
+  it("sanitizes OSC sequences in auth notice server names and messages", async () => {
+    const serverName = "git\x9d8;;https://example.invalid/server\x1b\\hub\x9d8;;\x1b\\";
+    const config: McpConfig = {
+      mcpServers: {
+        [serverName]: { url: "https://api.githubcopilot.com/mcp", auth: "oauth" },
+      },
+    };
+    const callbacks = createCallbacks("needs-auth");
+    callbacks.canAuthenticate = () => true;
+    callbacks.authenticate = vi.fn(async () => ({
+      ok: false,
+      message: "browser \x9d8;;https://example.invalid/error\x1b\\launch\x9d8;;\x1b\\ failed",
+    }));
+    callbacks.getConnectionStatus = () => "needs-auth";
+    const panel = createMcpPanel(config, null, new Map(), callbacks, { requestRender: () => {} }, () => {});
+
+    panel.handleInput("\r");
+    await Promise.resolve();
+
+    const output = stripAnsi(panel.render(100).join("\n"));
+    expect(output).toContain("OAuth failed for github: browser launch failed");
+    expect(output).not.toContain("\x1b]");
+    expect(output).not.toContain("\x9d");
+    expect(output).not.toContain("https://example.invalid/server");
+    expect(output).not.toContain("https://example.invalid/error");
+    panel.dispose();
+  });
+
   it("does not start duplicate auth while auth is already in flight", async () => {
     const config: McpConfig = {
       mcpServers: {

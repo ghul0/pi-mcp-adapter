@@ -7,9 +7,10 @@ import { buildProxyDescription, createDirectToolExecutor, getMissingConfiguredDi
 import { flushMetadataCache, initializeMcp, updateStatusBar } from "./init.ts";
 import { loadMetadataCache } from "./metadata-cache.ts";
 import { executeAuthComplete, executeAuthStart, executeCall, executeConnect, executeDescribe, executeList, executeSearch, executeStatus, executeUiMessages } from "./proxy-modes.ts";
-import { getConfigPathsFromArgv, truncateAtWord } from "./utils.ts";
+import { getConfigPathsFromArgv, normalizeDirectToolInputSchema, truncateAtWord } from "./utils.ts";
 import { initializeOAuth, shutdownOAuth } from "./mcp-auth-flow.ts";
 import { createMcpDirectToolCallRenderer, renderMcpProxyToolCall, renderMcpToolResult } from "./tool-result-renderer.ts";
+import { toolErrorOverride } from "./error-signal.ts";
 
 export default function mcpAdapter(pi: ExtensionAPI) {
   let state: McpExtensionState | null = null;
@@ -72,7 +73,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       label: `MCP: ${spec.originalName}`,
       description: spec.description || "(no description)",
       promptSnippet: truncateAtWord(spec.description, 100) || `MCP tool from ${spec.serverName}`,
-      parameters: Type.Unsafe((spec.inputSchema || { type: "object", properties: {} }) as never),
+      parameters: Type.Unsafe(normalizeDirectToolInputSchema(spec.inputSchema) as never),
       execute: createDirectToolExecutor(() => state, () => initPromise, spec),
       renderCall: createMcpDirectToolCallRenderer(spec.prefixedName),
       renderResult: renderMcpToolResult,
@@ -152,6 +153,9 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       console.error("MCP: session shutdown cleanup failed", error);
     }
   });
+
+  // Re-flag returned MCP tool failures so pi registers them as errors (see toolErrorOverride).
+  pi.on("tool_result", (event) => toolErrorOverride(event.details));
 
   pi.registerCommand("mcp", {
     description: "Show MCP server status",
@@ -276,7 +280,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         includeSchemas?: boolean;
         server?: string;
         action?: string;
-      }, _signal, _onUpdate, _ctx) {
+      }, signal, _onUpdate, _ctx) {
         let parsedArgs: Record<string, unknown> | undefined;
         if (params.args) {
           try {
@@ -340,10 +344,10 @@ export default function mcpAdapter(pi: ExtensionAPI) {
           return executeAuthComplete(state, params.server, input);
         }
         if (params.tool) {
-          return executeCall(state, params.tool, parsedArgs, params.server, getPiTools);
+          return executeCall(state, params.tool, parsedArgs, params.server, getPiTools, signal);
         }
         if (params.connect) {
-          return executeConnect(state, params.connect);
+          return executeConnect(state, params.connect, signal);
         }
         if (params.describe) {
           return executeDescribe(state, params.describe);
