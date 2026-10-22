@@ -61,7 +61,7 @@ describe("broker deny reason", () => {
   it("puts the reason into the proxy call's own result", async () => {
     const { state, callTool } = createState(claiming(() => ({ decision: "deny", reason: "Nie teraz" })));
     const result = await executeCall(state, tool.name, {});
-    expect(text(result)).toBe('The user declined approval to run MCP tool "send" on server "demo".\nReason: Nie teraz');
+    expect(text(result)).toBe('MCP tool "send" on server "demo" was blocked by the approval gate; it was not executed. This does not by itself mean the user rejected it.\nReason: Nie teraz');
     expect(result.details).toMatchObject({ mode: "call", error: "approval_denied", server: "demo", tool: "send", reason: "Nie teraz" });
     expect(callTool).not.toHaveBeenCalled();
   });
@@ -135,7 +135,7 @@ describe("broker deny reason", () => {
     }
     const { state } = createState(claiming(() => "deny"));
     const result = await executeCall(state, tool.name, {});
-    expect(text(result)).toBe('The user declined approval to run MCP tool "send" on server "demo".');
+    expect(text(result)).toBe('MCP tool "send" on server "demo" was blocked by the approval gate; it was not executed. This does not by itself mean the user rejected it.');
     expect(result.details).not.toHaveProperty("reason");
   });
 

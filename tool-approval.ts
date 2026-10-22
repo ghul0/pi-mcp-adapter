@@ -62,7 +62,7 @@ export function approvalBlockedResult(
   toolName: string,
 ): { text: string; details: { error: "approval_denied" | "approval_required"; server: string; tool: string; reason?: string } } {
   if (approval.reason === "denied") {
-    const base = `The user declined approval to run MCP tool "${toolName}" on server "${serverName}".`;
+    const base = `MCP tool "${toolName}" on server "${serverName}" was blocked by the approval gate; it was not executed. This does not by itself mean the user rejected it.`;
     return {
       text: approval.denyReason ? `${base}\nReason: ${approval.denyReason}` : base,
       details: {
