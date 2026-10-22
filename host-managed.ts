@@ -22,7 +22,7 @@ import { createJsonSchemaValidator } from "./json-schema-validator.ts";
 import { guardMcpOutput, guardedMcpDetails, resolveMcpOutputGuardOptions } from "./mcp-output-guard.ts";
 import { combineAbortSignals } from "./runtime-owner.ts";
 import { abortable } from "./abort.ts";
-import { requestBrokerApproval } from "./tool-approval.ts";
+import { approvalBlockedResult, requestBrokerApproval, type BrokerDecision } from "./tool-approval.ts";
 import { toToolParameters } from "./tool-parameters.ts";
 import { cleanupMaterializedBinaryResources, resolveMcpResultContent } from "./tool-registrar.ts";
 import { formatToolName } from "./types.ts";
@@ -182,7 +182,7 @@ function textResult(text: string, details: Record<string, unknown>): ToolResult 
   return { content: [{ type: "text", text }], details };
 }
 
-function isAllowed(decision: string): boolean {
+function isAllowed(decision: BrokerDecision): boolean {
   return decision === "allow_once" || decision === "allow_for_session";
 }
 
@@ -369,14 +369,19 @@ export function createHostManagedMcpAdapter(options: HostManagedMcpAdapterOption
     }
 
     const signal = combineAbortSignals(lifetime.signal, piSignal) ?? lifetime.signal;
-    let decision: string;
+    let decision: BrokerDecision;
     try {
       decision = await requestBrokerApproval(pi.events, tool.server, { name: tool.toolName, originalName: name }, args, "direct", signal);
     } catch {
       return dispatchFailureResult(tool, new HostManagedMcpError("not_sent", tool.server));
     }
-    if (decision === "deny") {
-      return textResult(`The user declined approval to run MCP tool "${name}" on server "${tool.server}".`, { error: "approval_denied", server: tool.server, tool: name });
+    if (decision === "deny" || typeof decision === "object") {
+      const blocked = approvalBlockedResult(
+        typeof decision === "object" ? { ok: false, reason: "denied", denyReason: decision.reason } : { ok: false, reason: "denied" },
+        tool.server,
+        name,
+      );
+      return textResult(blocked.text, blocked.details);
     }
     if (!isAllowed(decision)) {
       return textResult(`MCP tool "${name}" on server "${tool.server}" was not run: no approval handler allowed it.`, { error: "approval_required", server: tool.server, tool: name });
@@ -417,7 +422,7 @@ export function createHostManagedMcpAdapter(options: HostManagedMcpAdapterOption
     };
     const readLinkedResource = async (uri: string): Promise<HostManagedMcpResourceRead> => {
       if (unavailable()) throw new HostManagedMcpError("not_sent", tool.server);
-      let decision: string;
+      let decision: BrokerDecision;
       try {
         decision = await requestBrokerApproval(pi.events, tool.server, { name: tool.toolName, originalName: name }, Object.freeze({ uri }), "resource", signal);
       } catch {

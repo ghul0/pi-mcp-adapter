@@ -247,12 +247,14 @@ import {
 
 pi.events.on(MCP_TOOL_APPROVAL_REQUEST_EVENT, (request: McpToolApprovalRequest) => {
   request.claim(async () => {
-    return "allow_once"; // "allow_for_session" | "deny" | "abstain"
+    return "allow_once"; // "allow_for_session" | "deny" | "abstain" | { decision: "deny", reason }
   });
 });
 ```
 
 The request includes `serverName`, `originalToolName`, `prefixedToolName`, `args`, `origin`, and optional `signal`. The first synchronous claim wins. Brokered approval runs for every resolved MCP call reaching the approval gate, including calls matching session grants restored from the active branch, regardless of `approveTools` configuration, across the proxy, direct, resource, and iframe origins and the `script` origin, which is a call from another extension through the [runtime tool-call event](extension-api.md#runtime-tool-calls-from-other-extensions). `allow_once` permits only the current call; `allow_for_session` updates the same session-scoped approval cache and persistence path as the built-in dialog; `deny` blocks the current MCP call even if cached, without revoking its grant. Only `abstain` or no claim consults the cache, then the configured approval/UI fallback above if no matching grant exists. With no broker listener, fallback behavior is unchanged.
+
+A handler can explain a denial by returning `{ decision: "deny", reason: "..." }` instead of `"deny"`. Handlers should only do so when `request.supportsDenyReason` is `true`; any other object is treated as a plain `"deny"`. The model receives the reason in the result of the same call, after a neutral line saying the tool was blocked by the approval gate and not executed. The reason is shown as text: escape sequences and control characters are removed, and a reason over 8 KB is cut at a character boundary and marked as truncated.
 
 On Pi 0.99 and later, a call through `mcp` or `mcp__<server>`, or from a `codemode` script, reaches Pi's `tool_call` and `tool_result` hooks under the registered tool name (see [Codemode and tool_search](#codemode-and-tool_search)). A call that stays inside the proxy is one call to `mcp` with its arguments, and a runtime tool-call event reaches no Pi hook, so permission extensions that want every MCP call should use the broker event above. `approveTools` applies to every MCP call, whether it comes from `mcp`, a direct tool, or a script. It matches the MCP calls inside a [script tool](scripting.md#script-tools), never the script tool itself; a permission extension sees both, the script tool as `mcp__script__<name>`. If another extension also asks before `mcp` runs, one action can show two prompts.
 

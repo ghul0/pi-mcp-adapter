@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A permission extension that denies a call can now say why. A broker handler may return `{ decision: "deny", reason }` instead of `"deny"` when the request has `supportsDenyReason`, and the model gets the reason in the result of that same call, so it can adapt instead of guessing. Escape sequences and control characters are removed from the reason, and a reason over 8 KB is cut and marked as shortened. `McpToolApprovalDenial` and `McpToolApprovalHandlerResult` are new exports of `pi-mcp-adapter/types`.
+
+### Changed
+
+- A denied call no longer tells the model that "the user declined". A denial can come from an approval gate rather than from you, so the result now says the tool was blocked by the approval gate, was not executed, and does not by itself mean the user rejected it.
+
 ## [6.0.0] - 2026-10-22
 
 ### Highlights

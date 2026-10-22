@@ -24,7 +24,7 @@ import { executorCallParams, executorUnknownToolMatches, executorUnknownToolText
 import { canonicalPath } from "./executor-accounts.ts";
 import { describeExecutorAppTool, isExecutorCatalogConnection, isExecutorCatalogEntry } from "./executor-catalog.ts";
 import { paginate, rankSuggestions, rankToolMatches, resolveSearchKeywords, scoreToolMatch, type RankedToolMatch } from "./search-ranking.ts";
-import { ensureToolCallApproved, isToolCallApprovalRequired, type ToolCallApprovalResult } from "./tool-approval.ts";
+import { approvalBlockedResult, ensureToolCallApproved, isToolCallApprovalRequired, type ToolCallApprovalResult } from "./tool-approval.ts";
 import { describeFailure, isServerInActiveFailureBackoff } from "./failure-backoff.ts";
 import { semanticSearch, type SemanticSearchBackend, type SemanticSearchEvaluator } from "./semantic-search.ts";
 import { getInputRequiredNeedsUiDetails } from "./errors.ts";
@@ -1804,18 +1804,10 @@ export async function executeCall(
       origin ?? (toolMeta.resourceUri ? "resource" : "proxy"),
     );
     if (approval.ok === false) {
-      const denied = approval.reason === "denied";
-      const message = denied
-        ? `The user declined approval to run MCP tool "${toolMeta.originalName}" on server "${serverName}".`
-        : `MCP tool "${toolMeta.originalName}" on server "${serverName}" is approval-gated and requires an interactive session.`;
+      const blocked = approvalBlockedResult(approval, serverName, toolMeta.originalName);
       return {
-        content: [{ type: "text" as const, text: message }],
-        details: {
-          mode: "call",
-          error: denied ? "approval_denied" : "approval_required",
-          server: serverName,
-          tool: toolMeta.originalName,
-        },
+        content: [{ type: "text" as const, text: blocked.text }],
+        details: { mode: "call", ...blocked.details },
       };
     }
 

@@ -388,7 +388,17 @@ export interface McpTraceSettings {
 export declare const MCP_TOOL_APPROVAL_REQUEST_EVENT: "pi-mcp-adapter:tool-approval-request";
 export type McpToolApprovalOrigin = "proxy" | "direct" | "script" | "resource" | "iframe";
 export type McpToolApprovalDecision = "allow_once" | "allow_for_session" | "deny" | "abstain";
-export type McpToolApprovalHandler = () => McpToolApprovalDecision | Promise<McpToolApprovalDecision>;
+/**
+ * A denial that carries the approver's reason into the result of the same
+ * call. Only valid when the request advertised `supportsDenyReason`; any other
+ * object is treated as a plain "deny".
+ */
+export interface McpToolApprovalDenial {
+    decision: "deny";
+    reason: string;
+}
+export type McpToolApprovalHandlerResult = McpToolApprovalDecision | McpToolApprovalDenial;
+export type McpToolApprovalHandler = () => McpToolApprovalHandlerResult | Promise<McpToolApprovalHandlerResult>;
 export interface McpToolApprovalRequest {
     requestId: string;
     serverName: string;
@@ -397,6 +407,8 @@ export interface McpToolApprovalRequest {
     args: Record<string, unknown>;
     origin: McpToolApprovalOrigin;
     signal?: AbortSignal;
+    /** Capability: a handler may return { decision: "deny", reason } instead of "deny". */
+    supportsDenyReason: true;
     claim(handler: McpToolApprovalHandler): boolean;
 }
 export type { JevAnswer, JevErrorCode, JevEvaluateInput, JevEvaluationData, JevEvaluationEnvelope, JevJson, JevQuestion } from "./jev-contracts.ts";

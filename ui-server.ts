@@ -22,7 +22,7 @@ import { logger } from "./logger.ts";
 import type { McpServerManager, ServerConnection } from "./server-manager.ts";
 import type { McpExtensionState } from "./state.ts";
 import { SessionRecoveryAuthRequiredError, withSessionRecovery, type SessionRecoveryDeps } from "./session-recovery.ts";
-import { ensureToolCallApproved, isToolCallApprovalRequired } from "./tool-approval.ts";
+import { approvalBlockedResult, ensureToolCallApproved, isToolCallApprovalRequired } from "./tool-approval.ts";
 import { callToolViaTaskSession } from "./mcp-tasks.ts";
 import { callToolPausingForElicitation } from "./elicitation-handler.ts";
 import { callToolAnsweringExecutorPauses } from "./executor-pauses.ts";
@@ -518,19 +518,12 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
               ? { ok: false as const, reason: "approval_required_headless" as const }
               : { ok: true as const };
           if (approval.ok === false) {
-            const denied = approval.reason === "denied";
-            const message = denied
-              ? `The user declined approval to run MCP tool "${callParams.name}" on server "${options.serverName}".`
-              : `MCP tool "${callParams.name}" on server "${options.serverName}" is approval-gated and requires an interactive session.`;
+            const blocked = approvalBlockedResult(approval, options.serverName, callParams.name);
             sendJson(res, 200, {
               ok: true,
               result: {
-                content: [{ type: "text" as const, text: message }],
-                details: {
-                  error: denied ? "approval_denied" : "approval_required",
-                  server: options.serverName,
-                  tool: callParams.name,
-                },
+                content: [{ type: "text" as const, text: blocked.text }],
+                details: blocked.details,
               },
             });
             return;

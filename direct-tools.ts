@@ -20,7 +20,7 @@ import { callToolPausingForElicitation } from "./elicitation-handler.ts";
 import { callToolAnsweringExecutorPauses } from "./executor-pauses.ts";
 import { executorCallParams, executorUnknownToolMatches, executorUnknownToolText, unwrapExecutorCallResult } from "./executor-app-tools.ts";
 import { observedOutputRecorder } from "./output-shape.ts";
-import { ensureToolCallApproved, type ToolCallApprovalResult } from "./tool-approval.ts";
+import { approvalBlockedResult, ensureToolCallApproved, type ToolCallApprovalResult } from "./tool-approval.ts";
 import { getInputRequiredNeedsUiDetails } from "./errors.ts";
 
 type ClientCallToolResult = Awaited<ReturnType<Client["callTool"]>>;
@@ -270,17 +270,10 @@ export function createDirectToolExecutor(
         ...(annotations !== undefined ? { annotations } : {}),
       }, normalizedParams, ownedSignal, spec.resourceUri ? "resource" : "direct");
       if (approval.ok === false) {
-        const denied = approval.reason === "denied";
-        const message = denied
-          ? `The user declined approval to run MCP tool "${spec.originalName}" on server "${spec.serverName}".`
-          : `MCP tool "${spec.originalName}" on server "${spec.serverName}" is approval-gated and requires an interactive session.`;
+        const blocked = approvalBlockedResult(approval, spec.serverName, spec.originalName);
         return {
-          content: [{ type: "text" as const, text: message }],
-          details: {
-            error: denied ? "approval_denied" : "approval_required",
-            server: spec.serverName,
-            tool: spec.originalName,
-          },
+          content: [{ type: "text" as const, text: blocked.text }],
+          details: blocked.details,
         };
       }
 

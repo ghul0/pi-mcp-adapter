@@ -12,15 +12,72 @@ import {
   type McpConfig,
   type McpToolApprovalDecision,
   type McpToolApprovalHandler,
+  type McpToolApprovalHandlerResult,
   type McpToolApprovalOrigin,
   type McpToolApprovalRequest,
   type ToolMetadata,
 } from "./types.ts";
-import { sanitizeTerminalText } from "./utils.ts";
+import { sanitizeTerminalText, stripOscSequences } from "./utils.ts";
 
 export type ToolCallApprovalResult =
   | { ok: true }
-  | { ok: false; reason: "denied" | "approval_required_headless" };
+  | { ok: false; reason: "denied"; denyReason?: string }
+  | { ok: false; reason: "approval_required_headless" };
+
+/** Upper bound for an approver's deny reason, in UTF-8 bytes. */
+export const MAX_DENY_REASON_BYTES = 8192;
+const DENY_REASON_TRUNCATED = "\n[… reason truncated]";
+
+/**
+ * Make an approver's reason safe to hand back to the model: escape sequences
+ * and control characters go, newlines, tabs and every printable character
+ * (Polish letters included) stay. Over the byte limit it is cut on a
+ * character boundary and marked, so a shortened reason never reads as whole.
+ */
+export function sanitizeDenyReason(reason: string): string | undefined {
+  const cleaned = stripOscSequences(reason)
+    .replace(/\r\n?/g, "\n")
+    .replace(/(?:\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-Z\\-_])/g, "")
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "")
+    .trim();
+  if (!cleaned) return undefined;
+  const encoder = new TextEncoder();
+  if (encoder.encode(cleaned).length <= MAX_DENY_REASON_BYTES) return cleaned;
+  const budget = MAX_DENY_REASON_BYTES - encoder.encode(DENY_REASON_TRUNCATED).length;
+  let bytes = 0;
+  let cut = "";
+  for (const char of cleaned) {
+    const size = encoder.encode(char).length;
+    if (bytes + size > budget) break;
+    bytes += size;
+    cut += char;
+  }
+  return `${cut}${DENY_REASON_TRUNCATED}`;
+}
+
+/** The text and details a denied or gated call returns, shared by every call path. */
+export function approvalBlockedResult(
+  approval: Exclude<ToolCallApprovalResult, { ok: true }>,
+  serverName: string,
+  toolName: string,
+): { text: string; details: { error: "approval_denied" | "approval_required"; server: string; tool: string; reason?: string } } {
+  if (approval.reason === "denied") {
+    const base = `The user declined approval to run MCP tool "${toolName}" on server "${serverName}".`;
+    return {
+      text: approval.denyReason ? `${base}\nReason: ${approval.denyReason}` : base,
+      details: {
+        error: "approval_denied",
+        server: serverName,
+        tool: toolName,
+        ...(approval.denyReason ? { reason: approval.denyReason } : {}),
+      },
+    };
+  }
+  return {
+    text: `MCP tool "${toolName}" on server "${serverName}" is approval-gated and requires an interactive session.`,
+    details: { error: "approval_required", server: serverName, tool: toolName },
+  };
+}
 
 export function isToolCallApprovalRequired(
   config: McpConfig,
@@ -97,6 +154,19 @@ function isMcpToolApprovalDecision(value: unknown): value is McpToolApprovalDeci
     || value === "abstain";
 }
 
+export type BrokerDecision = McpToolApprovalDecision | { decision: "deny"; reason: string };
+
+/** Anything but a known string or a well-formed denial object is a deny. */
+function normalizeHandlerResult(value: McpToolApprovalHandlerResult | unknown): BrokerDecision {
+  if (isMcpToolApprovalDecision(value)) return value;
+  if (value && typeof value === "object" && (value as { decision?: unknown }).decision === "deny"
+    && typeof (value as { reason?: unknown }).reason === "string") {
+    const reason = sanitizeDenyReason((value as { reason: string }).reason);
+    return reason ? { decision: "deny", reason } : "deny";
+  }
+  return "deny";
+}
+
 /**
  * Returns "abstain" when no handler claims the request. A handler that throws
  * or returns an unknown value counts as "deny". Rethrows only when `signal` aborted.
@@ -108,7 +178,7 @@ export async function requestBrokerApproval(
   args: Record<string, unknown> | undefined,
   origin: McpToolApprovalOrigin,
   signal?: AbortSignal,
-): Promise<McpToolApprovalDecision> {
+): Promise<BrokerDecision> {
   if (!events) return "abstain";
 
   let acceptingClaim = true;
@@ -121,6 +191,7 @@ export async function requestBrokerApproval(
     args: args ?? {},
     origin,
     ...(signal !== undefined ? { signal } : {}),
+    supportsDenyReason: true,
     claim(candidate: McpToolApprovalHandler) {
       if (!acceptingClaim || handler) return false;
       handler = candidate;
@@ -134,7 +205,7 @@ export async function requestBrokerApproval(
 
   try {
     const decision = await abortable(Promise.resolve().then(handler), signal);
-    return isMcpToolApprovalDecision(decision) ? decision : "deny";
+    return normalizeHandlerResult(decision);
   } catch (error) {
     if (signal?.aborted) throw error;
     return "deny";
@@ -160,6 +231,7 @@ export async function ensureToolCallApproved(
     return { ok: true };
   }
   if (brokerDecision === "deny") return { ok: false, reason: "denied" };
+  if (typeof brokerDecision === "object") return { ok: false, reason: "denied", denyReason: brokerDecision.reason };
 
   const serverGrant = approvedServers.get(serverName);
   const liveServerIdentity = getServerApprovalIdentity(state, serverName);
