@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- A permission extension that denies a call can now say why. A broker handler may return `{ decision: "deny", reason }` instead of `"deny"` when the request has `supportsDenyReason`, and the model gets the reason in the result of that same call, so it can adapt instead of guessing. Escape sequences and control characters are removed from the reason, and a reason over 8 KB is cut and marked as shortened. `McpToolApprovalDenial` and `McpToolApprovalHandlerResult` are new exports of `pi-mcp-adapter/types`.
+- A permission extension that denies a call can now say why. A broker handler may return `{ decision: "deny", reason }` instead of `"deny"` when the request has `supportsDenyReason`, and the model gets the reason in the result of that same call, so it can adapt instead of guessing. Escape sequences and control characters are removed from the reason, and a reason over 8 KB is cut and marked as shortened. `McpToolApprovalDenial` and `McpToolApprovalHandlerResult` are new exports of `pi-mcp-adapter/types`. A denied linked resource read in the host-managed adapter carries the reason too: `HostManagedMcpError` has `denied` and `denyReason`.
 
 ### Changed
 

@@ -1,5 +1,10 @@
 import http from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createEventBus, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { CallToolRequestSchema, ListToolsRequestSchema, ReadResourceRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { createHostManagedMcpAdapter, HostManagedMcpError, type HostManagedMcpAdapter } from "../host-managed.ts";
 import { createDirectToolExecutor } from "../direct-tools.ts";
 import { executeCall } from "../proxy-modes.ts";
 import type { McpExtensionState } from "../state.ts";
@@ -200,5 +205,98 @@ describe("sanitizeDenyReason", () => {
       text: 'MCP tool "send" on server "demo" is approval-gated and requires an interactive session.',
       details: { error: "approval_required", server: "demo", tool: "send" },
     });
+  });
+});
+
+describe("host-managed linked read denial", () => {
+  const uri = "file:///chart.png";
+  const adapters: HostManagedMcpAdapter[] = [];
+  afterEach(async () => { await Promise.all(adapters.splice(0).map((adapter) => adapter.close())); });
+
+  async function readDenied(answer: (request: McpToolApprovalRequest) => unknown, dropAfterDispatch = false) {
+    const reads: string[] = [];
+    const caught: { error?: unknown } = {};
+    const adapter = createHostManagedMcpAdapter({
+      servers: {
+        fixture: {
+          tools: ["echo"],
+          createTransport: async () => {
+            const [client, serverSide] = InMemoryTransport.createLinkedPair();
+            const server = new Server({ name: "fixture", version: "1.0.0" }, { capabilities: { tools: {}, resources: {} } });
+            server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "echo", inputSchema: { type: "object", properties: {} } }] }));
+            server.setRequestHandler(CallToolRequestSchema, async () => ({ content: [{ type: "resource_link", uri, name: "chart" }] }));
+            server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+              reads.push(request.params.uri);
+              return { contents: [{ uri: request.params.uri, text: "x" }] };
+            });
+            await server.connect(serverSide as never);
+            return client;
+          },
+        },
+      },
+      async onToolCall(call) {
+        const result = await call.dispatch();
+        try {
+          await call.linkedResource(uri);
+        } catch (error) {
+          caught.error = error;
+        }
+        return result;
+      },
+    });
+    adapters.push(adapter);
+    await adapter.ready();
+    const tools = new Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>();
+    const events = createEventBus();
+    events.on(MCP_TOOL_APPROVAL_REQUEST_EVENT, (event) => {
+      const request = event as McpToolApprovalRequest;
+      if (request.origin === "direct") { request.claim(() => "allow_once"); return; }
+      if (dropAfterDispatch) return;
+      request.claim(() => answer(request) as never);
+    });
+    adapter.extensionFactory({ events, registerTool: (tool: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) => tools.set(tool.name, tool) } as unknown as ExtensionAPI);
+    await tools.get("fixture_echo")!.execute("call-1", {}, undefined, undefined, {});
+    return { error: caught.error, reads };
+  }
+
+  it("carries the approver's reason on a denied linked read", async () => {
+    const { error, reads } = await readDenied(() => ({ decision: "deny", reason: "No charts today" }));
+    expect(error).toBeInstanceOf(HostManagedMcpError);
+    expect(error).toMatchObject({ delivery: "not_sent", denied: true, denyReason: "No charts today" });
+    expect((error as Error).message).toBe('MCP server "fixture": the request was not sent (blocked by the approval gate). Reason: No charts today');
+    expect(reads).toEqual([]);
+  });
+
+  it("marks a denial without a reason as denied only", async () => {
+    for (const answer of ["deny", { decision: "deny", reason: "\x1b[31m\x07" }]) {
+      const { error } = await readDenied(() => answer);
+      expect(error).toMatchObject({ delivery: "not_sent", denied: true });
+      expect((error as HostManagedMcpError).denyReason).toBeUndefined();
+      expect((error as Error).message).toBe('MCP server "fixture": the request was not sent (blocked by the approval gate)');
+    }
+  });
+
+  it("sanitizes and caps the reason on this path", async () => {
+    const { error } = await readDenied(() => ({ decision: "deny", reason: `a\x1b[31mb\x1b]8;;http://evil\x07c${"z".repeat(20000)}` }));
+    const reason = (error as HostManagedMcpError).denyReason!;
+    expect(reason.startsWith("abc")).toBe(true);
+    expect(reason).not.toMatch(/[\x00-\x08\x1b]/);
+    expect(new TextEncoder().encode(reason).length).toBeLessThanOrEqual(8192);
+    expect(reason.endsWith("[… reason truncated]")).toBe(true);
+  });
+
+  it("leaves abstain and an unclaimed request without denied", async () => {
+    for (const run of [readDenied(() => "abstain"), readDenied(() => "abstain", true)]) {
+      const { error } = await run;
+      expect(error).toMatchObject({ delivery: "not_sent" });
+      expect((error as HostManagedMcpError).denied).toBeUndefined();
+      expect((error as HostManagedMcpError).denyReason).toBeUndefined();
+      expect((error as Error).message).toBe('MCP server "fixture": the request was not sent');
+    }
+  });
+
+  it("does not let a caller forge a reason without denied", () => {
+    const error = new HostManagedMcpError("not_sent", "s", { denyReason: "x" });
+    expect(error.denyReason).toBeUndefined();
   });
 });

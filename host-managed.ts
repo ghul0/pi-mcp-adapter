@@ -22,7 +22,7 @@ import { createJsonSchemaValidator } from "./json-schema-validator.ts";
 import { guardMcpOutput, guardedMcpDetails, resolveMcpOutputGuardOptions } from "./mcp-output-guard.ts";
 import { combineAbortSignals } from "./runtime-owner.ts";
 import { abortable } from "./abort.ts";
-import { approvalBlockedResult, requestBrokerApproval, type BrokerDecision } from "./tool-approval.ts";
+import { approvalBlockedResult, requestBrokerApproval, sanitizeDenyReason, type BrokerDecision } from "./tool-approval.ts";
 import { toToolParameters } from "./tool-parameters.ts";
 import { cleanupMaterializedBinaryResources, resolveMcpResultContent } from "./tool-registrar.ts";
 import { formatToolName } from "./types.ts";
@@ -123,13 +123,29 @@ export class HostManagedMcpError extends Error {
   readonly delivery: HostManagedMcpDelivery;
   readonly server: string;
   readonly protocolCode?: number;
+  /** Set when the approval gate refused the request (`delivery` stays `not_sent`). */
+  readonly denied?: true;
+  /** The approver's reason, with escape sequences and control characters removed and capped at 8 KB. */
+  readonly denyReason?: string;
 
-  constructor(delivery: HostManagedMcpDelivery, server: string, options: { cause?: unknown; protocolCode?: number } = {}) {
-    super(`MCP server "${server}": ${DELIVERY_MESSAGES[delivery]}`, options.cause !== undefined ? { cause: options.cause } : undefined);
+  constructor(
+    delivery: HostManagedMcpDelivery,
+    server: string,
+    options: { cause?: unknown; protocolCode?: number; denied?: boolean; denyReason?: string } = {},
+  ) {
+    const reason = options.denied && options.denyReason !== undefined ? sanitizeDenyReason(options.denyReason) : undefined;
+    const message = options.denied
+      ? `MCP server "${server}": ${DELIVERY_MESSAGES[delivery]} (blocked by the approval gate)${reason ? `. Reason: ${reason}` : ""}`
+      : `MCP server "${server}": ${DELIVERY_MESSAGES[delivery]}`;
+    super(message, options.cause !== undefined ? { cause: options.cause } : undefined);
     this.name = "HostManagedMcpError";
     this.delivery = delivery;
     this.server = server;
     if (options.protocolCode !== undefined) this.protocolCode = options.protocolCode;
+    if (options.denied) {
+      this.denied = true;
+      if (reason !== undefined) this.denyReason = reason;
+    }
   }
 }
 
@@ -428,6 +444,10 @@ export function createHostManagedMcpAdapter(options: HostManagedMcpAdapterOption
       } catch {
         decision = "abstain";
       }
+      if (typeof decision === "object" && decision.decision === "deny") {
+        throw new HostManagedMcpError("not_sent", tool.server, { denied: true, denyReason: decision.reason });
+      }
+      if (decision === "deny") throw new HostManagedMcpError("not_sent", tool.server, { denied: true });
       if (!isAllowed(decision) || unavailable()) throw new HostManagedMcpError("not_sent", tool.server);
       let readDispatched = false;
       const sendRead = async (): Promise<ReadResourceResult> => {
@@ -481,6 +501,10 @@ export function createHostManagedMcpAdapter(options: HostManagedMcpAdapterOption
         return dispatchFailureResult(tool, error, connection.retired.has(name));
       }
       const details = { error: "host_error", server: tool.server, tool: name, sent };
+      if (error instanceof HostManagedMcpError && error.denied && sent) {
+        const why = error.denyReason ? ` Reason: ${error.denyReason}` : "";
+        return textResult(`MCP tool "${name}" on server "${tool.server}" was sent and may have run; the host then failed because a follow-up read was blocked by the approval gate.${why} Do not retry automatically; check its effects first.`, { ...details, denied: true });
+      }
       return sent
         ? textResult(`The host failed while handling MCP tool "${name}" on server "${tool.server}" after the request was sent, so it may have run. Do not retry automatically; check its effects first.`, details)
         : textResult(`The host rejected MCP tool "${name}" on server "${tool.server}"; it was not run.`, details);

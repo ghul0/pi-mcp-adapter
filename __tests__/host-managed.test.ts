@@ -401,6 +401,7 @@ describe("host-managed MCP adapter", () => {
 
     expect(result.details).toMatchObject({ error: "host_error", sent: true });
     expect(text(result)).toContain("may have run");
+    expect(text(result)).toContain("blocked by the approval gate");
     expect(fixture.calls).toHaveLength(1);
     expect(fixture.reads).toEqual([]);
   });
