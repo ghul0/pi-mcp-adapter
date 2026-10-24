@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - A denied call no longer tells the model that "the user declined". A denial can come from an approval gate rather than from you, so the result now says the tool was blocked by the approval gate, was not executed, and does not by itself mean the user rejected it. When you pick Deny in Pi's approval dialog, the result adds "Reason: The user denied it in the approval dialog." Thanks to [@ghul0](https://github.com/ghul0) for [#879](https://github.com/nicobailon/pi-mcp-adapter/pull/879).
+- A config value can now give a fallback for an environment variable with `${VAR:-default}`, the way Claude Code's `.mcp.json` does. The fallback is used when the variable isn't set. Before, the adapter left that text as written, so a project `.mcp.json` that worked in Claude Code failed here with an invalid URL or sent the literal text in a header. Thanks to [@deniskern](https://github.com/deniskern) for [#878](https://github.com/nicobailon/pi-mcp-adapter/issues/878).
 
 ### Fixed
 
