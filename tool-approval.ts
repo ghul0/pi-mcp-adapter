@@ -291,5 +291,6 @@ export async function ensureToolCallApproved(
     rememberToolApproval(state, serverName, toolMeta, args);
     return { ok: true };
   }
+  if (decision === "Deny") return { ok: false, reason: "denied", denyReason: "The user denied it in the approval dialog." };
   return { ok: false, reason: "denied" };
 }

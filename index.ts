@@ -53,7 +53,9 @@ export {
   type McpServerStatusSnapshot,
   type McpStatusSnapshot,
   type McpToolApprovalDecision,
+  type McpToolApprovalDenial,
   type McpToolApprovalHandler,
+  type McpToolApprovalHandlerResult,
   type McpToolApprovalOrigin,
   type McpToolApprovalRequest,
 } from "./types.ts";

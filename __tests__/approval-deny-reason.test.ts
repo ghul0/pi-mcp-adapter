@@ -191,9 +191,8 @@ describe("sanitizeDenyReason", () => {
 
   it("cuts an over-long reason on a character boundary and marks it", () => {
     const result = sanitizeDenyReason("ż".repeat(MAX_DENY_REASON_BYTES))!;
-    expect(new TextEncoder().encode(result).length).toBeLessThanOrEqual(MAX_DENY_REASON_BYTES);
-    expect(result.endsWith("\n[… reason truncated]")).toBe(true);
-    expect(result).not.toContain("�");
+    // 8192 bytes minus the 23-byte marker leaves room for 4084 two-byte letters.
+    expect(result).toBe(`${"ż".repeat(4084)}\n[… reason truncated]`);
   });
 
   it("returns undefined for a reason that is empty after cleaning", () => {
@@ -213,8 +212,9 @@ describe("host-managed linked read denial", () => {
   const adapters: HostManagedMcpAdapter[] = [];
   afterEach(async () => { await Promise.all(adapters.splice(0).map((adapter) => adapter.close())); });
 
-  async function readDenied(answer: (request: McpToolApprovalRequest) => unknown, dropAfterDispatch = false) {
+  async function readDenied(answer: (request: McpToolApprovalRequest) => unknown, dropAfterDispatch = false, directAnswer: unknown = "allow_once") {
     const reads: string[] = [];
+    let calls = 0;
     const caught: { error?: unknown } = {};
     const adapter = createHostManagedMcpAdapter({
       servers: {
@@ -224,7 +224,10 @@ describe("host-managed linked read denial", () => {
             const [client, serverSide] = InMemoryTransport.createLinkedPair();
             const server = new Server({ name: "fixture", version: "1.0.0" }, { capabilities: { tools: {}, resources: {} } });
             server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [{ name: "echo", inputSchema: { type: "object", properties: {} } }] }));
-            server.setRequestHandler(CallToolRequestSchema, async () => ({ content: [{ type: "resource_link", uri, name: "chart" }] }));
+            server.setRequestHandler(CallToolRequestSchema, async () => {
+              calls += 1;
+              return { content: [{ type: "resource_link", uri, name: "chart" }] };
+            });
             server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
               reads.push(request.params.uri);
               return { contents: [{ uri: request.params.uri, text: "x" }] };
@@ -250,14 +253,21 @@ describe("host-managed linked read denial", () => {
     const events = createEventBus();
     events.on(MCP_TOOL_APPROVAL_REQUEST_EVENT, (event) => {
       const request = event as McpToolApprovalRequest;
-      if (request.origin === "direct") { request.claim(() => "allow_once"); return; }
+      if (request.origin === "direct") { request.claim(() => directAnswer as never); return; }
       if (dropAfterDispatch) return;
       request.claim(() => answer(request) as never);
     });
     adapter.extensionFactory({ events, registerTool: (tool: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) => tools.set(tool.name, tool) } as unknown as ExtensionAPI);
-    await tools.get("fixture_echo")!.execute("call-1", {}, undefined, undefined, {});
-    return { error: caught.error, reads };
+    const result = await tools.get("fixture_echo")!.execute("call-1", {}, undefined, undefined, {}) as { content: Array<{ type: string; text?: string }>; details?: unknown };
+    return { error: caught.error, reads, calls, result };
   }
+  it("puts the reason into a denied host-managed call's own result", async () => {
+    const { result, calls } = await readDenied(() => "allow_once", false, { decision: "deny", reason: "Poza godzinami" });
+    expect(text(result)).toBe('MCP tool "echo" on server "fixture" was blocked by the approval gate; it was not executed. This does not by itself mean the user rejected it.\nReason: Poza godzinami');
+    expect(result.details).toMatchObject({ error: "approval_denied", server: "fixture", tool: "echo", reason: "Poza godzinami" });
+    expect(calls).toBe(0);
+  });
+
 
   it("carries the approver's reason on a denied linked read", async () => {
     const { error, reads } = await readDenied(() => ({ decision: "deny", reason: "No charts today" }));

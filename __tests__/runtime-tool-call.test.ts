@@ -177,7 +177,7 @@ describe("runtime MCP tool-call event", () => {
 
   it("reports a tool error that executeCall resolves as ok:false", async () => {
     mocks.executeCall.mockResolvedValue({
-      content: [{ type: "text", text: "The user declined approval" }],
+      content: [{ type: "text", text: 'MCP tool "search" on server "demo" was blocked by the approval gate; it was not executed. This does not by itself mean the user rejected it.' }],
       details: { mode: "call", error: "approval_denied" },
     });
     const { handlers, callTool } = await startAdapter();
