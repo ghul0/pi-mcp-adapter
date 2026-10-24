@@ -9,11 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A long-running MCP tool, such as a CI run or a report export, used to hold Pi until it finished. Now the call returns right away, the agent keeps working, and the result arrives by itself when the job ends. `/mcp-adapter tasks` lists running jobs and stops one. Calls from scripts and other code, MCP UI and Executor tools, and sessions outside the interactive terminal still wait for their result. This needs a server that supports MCP Tasks on a 2026-07-28 connection (`"protocolVersion": "auto"`). See [#882](https://github.com/nicobailon/pi-mcp-adapter/issues/882) and [Task-augmented tool calls](docs/servers.md#task-augmented-tool-calls).
+- You can ask the agent to stop one of those long-running jobs, and it can stop one it no longer needs, instead of the job running to the end and its stale result arriving later. The agent sends the same cancel request as `/mcp-adapter tasks stop`. See [#884](https://github.com/nicobailon/pi-mcp-adapter/issues/884).
+- A long-running MCP job now keeps running when the adapter reconnects to its server, where before the reconnect cancelled it. If you switch away from the session, reload or quit Pi while the job runs, the job is saved with the session, and when you open that same session again its result still arrives, once. A forked or new session doesn't pick the job up, and a job on a stdio server usually ends when Pi quits, so its outcome is then unknown. When Pi can't follow a job, the agent is told why and that calling the tool again may repeat the work. See [#885](https://github.com/nicobailon/pi-mcp-adapter/issues/885) and [Task-augmented tool calls](docs/servers.md#task-augmented-tool-calls).
 - A permission extension that denies a call can now say why. A broker handler may return `{ decision: "deny", reason }` instead of `"deny"` when the request has `supportsDenyReason`, and the model gets the reason in the result of that same call, so it can adapt instead of guessing. Escape sequences and control characters are removed from the reason, and a reason over 8 KB is cut and marked as shortened. `McpToolApprovalDenial` and `McpToolApprovalHandlerResult` are new exports of `pi-mcp-adapter/types`. A denied linked resource read in the host-managed adapter carries the reason too: `HostManagedMcpError` has `denied` and `denyReason`.
 
 ### Changed
 
 - A denied call no longer tells the model that "the user declined". A denial can come from an approval gate rather than from you, so the result now says the tool was blocked by the approval gate, was not executed, and does not by itself mean the user rejected it.
+
+### Fixed
+
+- When a long-running MCP job asked Pi's model for a reply, pressing Esc on whatever turn was running at that moment could cut that reply off, even though the job had nothing to do with that turn. The reply now runs until it finishes, the job ends or is stopped with `/mcp-adapter tasks stop`, or the session ends. See [#886](https://github.com/nicobailon/pi-mcp-adapter/issues/886).
 
 ## [6.0.0] - 2026-10-22
 

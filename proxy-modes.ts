@@ -17,9 +17,10 @@ import { maybeStartUiSession, summarizeUiSessionResult, type UiSessionRuntime } 
 import { formatAuthRequiredMessage, formatMcpStatus, normalizeToolArguments, resolveServerUrl, truncateAtWord, withToolCallIdMeta } from "./utils.ts";
 import { authenticate, completeAuthFromInput, getAuthStatus, startAuth, supportsOAuth } from "./mcp-auth-flow.ts";
 import { SessionRecoveryAuthRequiredError, withSessionRecovery } from "./session-recovery.ts";
-import { callToolViaTaskSession } from "./mcp-tasks.ts";
+import { callToolViaTaskSession, startToolViaTaskSession, type StartedToolCall } from "./mcp-tasks.ts";
+import { backgroundTaskHandle } from "./task-jobs.ts";
 import { callToolPausingForElicitation } from "./elicitation-handler.ts";
-import { callToolAnsweringExecutorPauses } from "./executor-pauses.ts";
+import { callToolAnsweringExecutorPauses, isExecutorConnection } from "./executor-pauses.ts";
 import { executorCallParams, executorUnknownToolMatches, executorUnknownToolText, unwrapExecutorCallResult } from "./executor-app-tools.ts";
 import { canonicalPath } from "./executor-accounts.ts";
 import { describeExecutorAppTool, isExecutorCatalogConnection, isExecutorCatalogEntry } from "./executor-catalog.ts";
@@ -242,7 +243,7 @@ function emitAuthStatus(state: McpExtensionState, serverName: string, status: "a
     {
       customType: "mcp-oauth-status",
       content: [{ type: "text", text: message }],
-      display: message,
+      display: true,
       details: {
         server: serverName,
         status,
@@ -1259,6 +1260,28 @@ function formatParameterNames(toolMeta: ToolMetadata): string {
   return `(${ordered.join(", ")})`;
 }
 
+/** `mcp({ cancelTask })`: stops a background task the model started; no tool approval, like `/mcp-adapter tasks stop`. */
+export async function executeCancelTask(state: McpExtensionState, key: string): Promise<ProxyToolResult> {
+  const failed = (text: string, error: string) => ({
+    content: [{ type: "text" as const, text }],
+    details: { mode: "cancelTask", task: key, error },
+  });
+  if (state.backgroundTasks === undefined) {
+    return failed("Background MCP tasks run only in the interactive terminal, so there is no task to cancel.", "no_background_tasks");
+  }
+  try {
+    if (!await state.backgroundTasks.stop(key, "the agent")) {
+      return failed(`No running MCP task "${key}". It may have finished already; its result arrives as an mcp-task-result message.`, "not_found");
+    }
+  } catch (error) {
+    return failed(`Could not cancel MCP task "${key}": ${error instanceof Error ? error.message : String(error)}`, "cancel_failed");
+  }
+  return {
+    content: [{ type: "text" as const, text: `Cancel requested for MCP task "${key}". An mcp-task-result message confirms it.` }],
+    details: { mode: "cancelTask", task: key },
+  };
+}
+
 export function executeInstructions(state: McpExtensionState, server: string): ProxyToolResult {
   const definition = state.config.mcpServers[server];
   if (!definition) {
@@ -1791,6 +1814,8 @@ export async function executeCall(
   };
 
   let approval: ToolCallApprovalResult | undefined;
+  // A call handed to the background task registry leaves its in-flight count there.
+  let backgrounded = false;
   try {
     // In flight from here so an idle check cannot close the server while the approval dialog is open.
     state.manager.touch(serverName);
@@ -1860,6 +1885,32 @@ export async function executeCall(
     const callParams = toolMeta.executorPath !== undefined
       ? executorCallParams(toolMeta.executorPath, normalizedArgs)
       : { name: toolMeta.originalName, arguments: normalizedArgs };
+    // A delivered task result names its call in details.task instead of the call identity.
+    const renderResult = async (
+      result: Record<string, unknown>,
+      identity: Record<string, unknown> = { mode: "call", ...callIdentity },
+      suffix?: string,
+    ) => {
+      const content = resolveMcpResultContent(result, state.owner?.signal, appendStructuredContent);
+      const outputContent = content.length > 0 ? content : [{ type: "text" as const, text: "(empty result)" }];
+      const guarded = await guardMcpOutput(outputContent, {
+        ...outputGuardOptions,
+        ...(suffix === undefined ? {} : { suffix }),
+        ...(result.isError ? { prefix: "Error: ", emptyTextFallback: "Tool execution failed" } : {}),
+        rawMcpResult: toScript ? undefined : result,
+      });
+      return {
+        content: guarded.content,
+        details: { ...identity, ...(result.isError ? { error: "tool_error" } : {}), ...guardedMcpDetails(guarded) },
+      };
+    };
+    // Only a call the model made goes to the background; code callers (scripts, other extensions,
+    // internal consumers) and the MCP-UI and Executor flows need the value itself.
+    const backgroundTasks = origin !== "script" && state.calledByModel?.(toolCallId) === true
+      && !internalDelivery && !uiResourceUri && toolMeta.executorPath === undefined
+      ? state.backgroundTasks
+      : undefined;
+    let startedTask = undefined as Extract<StartedToolCall, { kind: "task" }> | undefined;
     const callResult = await withSessionRecovery<ClientCallToolResult>(
       {
         manager: state.manager,
@@ -1880,19 +1931,46 @@ export async function executeCall(
           signal: ownedSignal,
           call: async (params, options) => {
             if (conn.taskSession) {
-              return await callToolViaTaskSession(conn.taskSession, {
+              const taskCall = {
                 name: params.name,
                 args: params.arguments ?? {},
                 meta: params._meta,
                 signal: ownedSignal,
                 requestTimeoutMs: options?.timeout,
-              }) as unknown as ClientCallToolResult;
+              };
+              if (backgroundTasks === undefined || isExecutorConnection(conn)) {
+                return await callToolViaTaskSession(conn.taskSession, taskCall) as unknown as ClientCallToolResult;
+              }
+              const started = await startToolViaTaskSession(conn.taskSession, taskCall);
+              if (started.kind === "result") return started.result as unknown as ClientCallToolResult;
+              startedTask = started;
+              return { content: [] } as ClientCallToolResult;
             }
             return abortable(callToolPausingForElicitation(conn.client, params, options), ownedSignal);
           },
         });
       },
     );
+    if (startedTask !== undefined) {
+      const { taskId, execution } = startedTask;
+      void backgroundTasks!.start({
+        server: serverName,
+        tool: toolMeta.originalName,
+        taskId,
+        execution,
+        render: async (result) => {
+          if (!result.isError) recordOutput(result);
+          return renderResult(result, {});
+        },
+        guard: async (text) => {
+          const guarded = await guardMcpOutput([{ type: "text", text }], outputGuardOptions);
+          return { content: guarded.content, details: guardedMcpDetails(guarded) };
+        },
+      });
+      backgrounded = true;
+      const handle = backgroundTaskHandle(serverName, toolMeta.originalName, taskId, state.proxyToolAvailable?.() === true);
+      return { content: handle.content, details: { mode: "call", ...callIdentity, task: handle.task } };
+    }
     const result = toolMeta.executorPath !== undefined ? unwrapExecutorCallResult(toolMeta.executorPath, callResult) : callResult;
     const executorMatches = toolMeta.executorPath !== undefined ? executorUnknownToolMatches(toolMeta.executorPath, callResult) : undefined;
     if (executorMatches) {
@@ -1914,51 +1992,12 @@ export async function executeCall(
       return { content: [], details: { mode: "call", ...callIdentity } };
     }
 
-    if (uiResourceUri) {
-      if (result.isError) {
-        const content = resolveMcpResultContent(result as Record<string, unknown>, state.owner?.signal, appendStructuredContent);
-        const outputContent = content.length > 0 ? content : [{ type: "text" as const, text: "(empty result)" }];
-        const guarded = await guardMcpOutput(outputContent, { ...outputGuardOptions, prefix: "Error: ", emptyTextFallback: "Tool execution failed", rawMcpResult: toScript ? undefined : result });
-        return {
-          content: guarded.content,
-          details: { mode: "call", error: "tool_error", ...callIdentity, ...guardedMcpDetails(guarded) },
-        };
-      }
-
-      const content = resolveMcpResultContent(result as Record<string, unknown>, state.owner?.signal, appendStructuredContent);
-      const outputContent = content.length > 0 ? content : [{ type: "text" as const, text: "(empty result)" }];
-      const uiSummary = summarizeUiSessionResult(uiSession);
-      const guarded = await guardMcpOutput(outputContent, { ...outputGuardOptions, suffix: `\n\n${uiSummary.message}`, rawMcpResult: toScript ? undefined : result });
-      return {
-        content: guarded.content,
-        details: {
-          mode: "call",
-          ...guardedMcpDetails(guarded),
-          ...callIdentity,
-          uiOpen: uiSummary.uiOpen,
-          uiViewer: uiSummary.uiViewer,
-          uiUrl: uiSummary.uiUrl,
-        },
-      };
+    if (uiResourceUri && !result.isError) {
+      const { message, uiOpen, uiViewer, uiUrl } = summarizeUiSessionResult(uiSession);
+      return await renderResult(result as Record<string, unknown>, { mode: "call", ...callIdentity, uiOpen, uiViewer, uiUrl }, `\n\n${message}`);
     }
 
-    if (result.isError) {
-      const content = resolveMcpResultContent(result as Record<string, unknown>, state.owner?.signal, appendStructuredContent);
-      const outputContent = content.length > 0 ? content : [{ type: "text" as const, text: "(empty result)" }];
-      const guarded = await guardMcpOutput(outputContent, { ...outputGuardOptions, prefix: "Error: ", emptyTextFallback: "Tool execution failed", rawMcpResult: toScript ? undefined : result });
-      return {
-        content: guarded.content,
-        details: { mode: "call", error: "tool_error", ...callIdentity, ...guardedMcpDetails(guarded) },
-      };
-    }
-
-    const content = resolveMcpResultContent(result as Record<string, unknown>, state.owner?.signal, appendStructuredContent);
-    const outputContent = content.length > 0 ? content : [{ type: "text" as const, text: "(empty result)" }];
-    const guarded = await guardMcpOutput(outputContent, { ...outputGuardOptions, rawMcpResult: toScript ? undefined : result });
-    return {
-      content: guarded.content,
-      details: { mode: "call", ...guardedMcpDetails(guarded), ...callIdentity },
-    };
+    return await renderResult(result as Record<string, unknown>);
   } catch (error) {
     // Approval errors, such as an abort while the dialog is open, propagate unchanged.
     if (!approval) throw error;
@@ -2003,7 +2042,7 @@ export async function executeCall(
     if (uiSession?.reused) {
       uiSession.close();
     }
-    state.manager.decrementInFlight(serverName);
+    if (!backgrounded) state.manager.decrementInFlight(serverName);
     state.manager.touch(serverName);
   }
 }

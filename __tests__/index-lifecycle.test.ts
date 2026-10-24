@@ -6,6 +6,8 @@ import { MCP_STATUS_EVENT } from "../types.ts";
 import { computeServerHash } from "../metadata-cache.ts";
 import { ConsentManager } from "../consent-manager.ts";
 import { MCP_APPROVAL_CUSTOM_TYPE, getToolApprovalIdentity, makeToolApprovalKey } from "../session-approvals.ts";
+import { BackgroundTaskRegistry } from "../task-jobs.ts";
+import { MCP_TASK_CUSTOM_TYPE, pendingTaskEntry } from "../task-entries.ts";
 
 const mocks = vi.hoisted(() => ({
   initializeMcp: vi.fn(),
@@ -1079,6 +1081,64 @@ describe("mcpAdapter session lifecycle", () => {
 
     await rejection;
     expect(mocks.writeSharedServerEntry).not.toHaveBeenCalled();
+  });
+
+  it("lets the stopping session claim background tasks before its owner stops, even with none running", async () => {
+    const state = createState();
+    let ownerSignal!: AbortSignal;
+    const ownerStoppedAtHandOff: boolean[] = [];
+    mocks.initializeMcp.mockImplementation((_pi: unknown, _ctx: unknown, owner: { signal: AbortSignal }) => {
+      ownerSignal = owner.signal;
+      state.backgroundTasks = new BackgroundTaskRegistry({ decrementInFlight: vi.fn(), touch: vi.fn() }, vi.fn(), owner.signal, undefined, vi.fn());
+      const handOff = state.backgroundTasks.handOffForShutdown.bind(state.backgroundTasks);
+      state.backgroundTasks.handOffForShutdown = () => {
+        ownerStoppedAtHandOff.push(ownerSignal.aborted);
+        return handOff();
+      };
+      return Promise.resolve(state);
+    });
+    const { handlers } = await loadAdapter();
+    await handlers.get("session_start")?.({}, { hasUI: false });
+    await vi.waitFor(() => expect(mocks.updateStatusBar).toHaveBeenCalledWith(state));
+
+    await handlers.get("session_shutdown")?.();
+
+    expect(ownerStoppedAtHandOff).toEqual([false]);
+    expect(ownerSignal.aborted).toBe(true);
+  });
+
+  it("hands running background tasks off to the stopping session before its owner stops", async () => {
+    const state = createState();
+    const persisted: Array<{ key: string; ownerStopped: boolean }> = [];
+    let ownerSignal!: AbortSignal;
+    mocks.initializeMcp.mockImplementation((_pi: unknown, _ctx: unknown, owner: { signal: AbortSignal }) => {
+      ownerSignal = owner.signal;
+      state.backgroundTasks = new BackgroundTaskRegistry(
+        { decrementInFlight: vi.fn(), touch: vi.fn() },
+        vi.fn(),
+        owner.signal,
+        undefined,
+        (task) => persisted.push({ key: task.key, ownerStopped: ownerSignal.aborted }),
+      );
+      return Promise.resolve(state);
+    });
+    const { handlers } = await loadAdapter();
+    await handlers.get("session_start")?.({}, { hasUI: false });
+    await vi.waitFor(() => expect(mocks.updateStatusBar).toHaveBeenCalledWith(state));
+    const execution = {
+      kind: "task",
+      cancel: vi.fn(async () => {}),
+      settle: () => new Promise(() => {}),
+      handoff: async (persist: (reference: unknown) => void) => persist({ generation: "v2", taskId: "t-1" }),
+      result: async () => ({ status: "failed" }),
+    };
+    void state.backgroundTasks.start({ server: "demo", tool: "build", taskId: "t-1", execution, render: vi.fn(), guard: vi.fn() });
+
+    await handlers.get("session_shutdown")?.();
+
+    expect(persisted).toEqual([{ key: "demo/t-1", ownerStopped: false }]);
+    expect(ownerSignal.aborted).toBe(true);
+    expect(execution.cancel).not.toHaveBeenCalled();
   });
 
   it("rethrows an owner-aborted cache update instead of syncing prompts or succeeding", async () => {
@@ -3230,6 +3290,25 @@ describe("mcpAdapter session lifecycle", () => {
     expect(setStatus).toHaveBeenCalledWith("mcp", undefined);
   });
 
+  it.each([
+    ["starts the runtime for a session with a task to resume", "s-1", true],
+    ["still defers for a session whose saved task belongs to another session", "fork", false],
+  ])("%s, though its cache would let startup defer", async (_case, sessionId, initializes) => {
+    cacheLazyServer({ command: "demo" });
+    mocks.initializeMcp.mockResolvedValue(createState());
+    const reference = { endpointId: "e1", generation: "v2", taskId: "t-1", originalOperation: "tools/call" } as const;
+    const entry = pendingTaskEntry("s-1", { key: "demo/t-1", server: "demo", tool: "build", reference });
+    const sessionManager = {
+      getBranch: vi.fn(() => [{ type: "custom", customType: MCP_TASK_CUSTOM_TYPE, data: entry }]),
+      getSessionId: vi.fn(() => sessionId),
+    };
+
+    const { handlers } = await loadAdapter();
+    await handlers.get("session_start")?.({}, { hasUI: true, mode: "tui", ui: { setStatus: vi.fn(), notify: vi.fn() }, sessionManager });
+
+    expect(mocks.initializeMcp).toHaveBeenCalledTimes(initializes ? 1 : 0);
+  });
+
   it("lets live runtime status overwrite the provisional deferred footer on first use", async () => {
     const definition = { command: "demo" };
     cacheLazyServer(definition);
@@ -3714,6 +3793,7 @@ describe("mcpAdapter session lifecycle", () => {
       "reconnect",
       "tools",
       "prompts",
+      "tasks",
       "setup",
       "jev",
       "edit",
@@ -3744,6 +3824,13 @@ describe("mcpAdapter session lifecycle", () => {
     ]);
     expect(commandDef.getArgumentCompletions("jev s")).toEqual([
       { value: "jev setup", label: "setup — Configure Jev semantic search" },
+    ]);
+    state.backgroundTasks = { list: () => [{ key: "github/t-1", tool: "build", status: "working" }] };
+    expect(commandDef.getArgumentCompletions("tasks ")).toEqual([
+      { value: "tasks stop ", label: "stop — Stop a background MCP task" },
+    ]);
+    expect(commandDef.getArgumentCompletions("tasks stop git")).toEqual([
+      { value: "tasks stop github/t-1", label: "github/t-1 (build)" },
     ]);
     expect(commandDef.getArgumentCompletions("tools anything")).toBeNull();
     expect(api.registerCommand.mock.calls.some((call: any[]) => call[0] === "mcp-reconnect")).toBe(false);

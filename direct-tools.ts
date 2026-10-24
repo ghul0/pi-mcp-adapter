@@ -15,9 +15,10 @@ import { authenticate, supportsOAuth } from "./mcp-auth-flow.ts";
 import { formatAuthRequiredMessage, normalizeToolArguments, resolveServerUrl, withToolCallIdMeta } from "./utils.ts";
 import { SessionRecoveryAuthRequiredError, withSessionRecovery } from "./session-recovery.ts";
 import { combineAbortSignals, isAbortError } from "./runtime-owner.ts";
-import { callToolViaTaskSession } from "./mcp-tasks.ts";
+import { callToolViaTaskSession, startToolViaTaskSession, type StartedToolCall } from "./mcp-tasks.ts";
+import { backgroundTaskHandle } from "./task-jobs.ts";
 import { callToolPausingForElicitation } from "./elicitation-handler.ts";
-import { callToolAnsweringExecutorPauses } from "./executor-pauses.ts";
+import { callToolAnsweringExecutorPauses, isExecutorConnection } from "./executor-pauses.ts";
 import { executorCallParams, executorUnknownToolMatches, executorUnknownToolText, unwrapExecutorCallResult } from "./executor-app-tools.ts";
 import { observedOutputRecorder } from "./output-shape.ts";
 import { approvalBlockedResult, ensureToolCallApproved, type ToolCallApprovalResult } from "./tool-approval.ts";
@@ -255,6 +256,8 @@ export function createDirectToolExecutor(
     };
 
     let approval: ToolCallApprovalResult | undefined;
+    // A call handed to the background task registry leaves its in-flight count there.
+    let backgrounded = false;
     try {
       // In flight from here so an idle check cannot close the server while the approval dialog is open.
       state.manager.touch(spec.serverName);
@@ -324,6 +327,20 @@ export function createDirectToolExecutor(
       const callParams = spec.executorPath !== undefined
         ? executorCallParams(spec.executorPath, normalizedParams)
         : { name: spec.originalName, arguments: normalizedParams };
+      const guardResult = (result: Record<string, unknown>, suffix?: string) => {
+        const content = resolveMcpResultContent(result, state.owner?.signal, appendStructuredContent);
+        return guardMcpOutput(content.length > 0 ? content : [{ type: "text" as const, text: "(empty result)" }], {
+          ...outputGuardOptions,
+          ...(suffix === undefined ? {} : { suffix }),
+          ...(result.isError ? { prefix: "Error: ", emptyTextFallback: "Tool execution failed" } : {}),
+          ...(rawDetails ? { rawMcpResult: result } : {}),
+        });
+      };
+      // Only a call the model made goes to the background; code callers and the MCP-UI and Executor flows need the value itself.
+      const backgroundTasks = state.calledByModel?.(toolCallId) === true && !hasUi && spec.executorPath === undefined
+        ? state.backgroundTasks
+        : undefined;
+      let startedTask = undefined as Extract<StartedToolCall, { kind: "task" }> | undefined;
       const callResult = await withSessionRecovery<ClientCallToolResult>(
         {
           manager: state.manager,
@@ -344,19 +361,47 @@ export function createDirectToolExecutor(
             signal: ownedSignal,
             call: async (params, options) => {
               if (conn.taskSession) {
-                return await callToolViaTaskSession(conn.taskSession, {
+                const taskCall = {
                   name: params.name,
                   args: params.arguments ?? {},
                   meta: params._meta,
                   signal: ownedSignal,
                   requestTimeoutMs: options?.timeout,
-                }) as unknown as ClientCallToolResult;
+                };
+                if (backgroundTasks === undefined || isExecutorConnection(conn)) {
+                  return await callToolViaTaskSession(conn.taskSession, taskCall) as unknown as ClientCallToolResult;
+                }
+                const started = await startToolViaTaskSession(conn.taskSession, taskCall);
+                if (started.kind === "result") return started.result as unknown as ClientCallToolResult;
+                startedTask = started;
+                return { content: [] } as ClientCallToolResult;
               }
               return abortable(callToolPausingForElicitation(conn.client, params, options), ownedSignal);
             },
           });
         },
       );
+      if (startedTask !== undefined) {
+        const { taskId, execution } = startedTask;
+        void backgroundTasks!.start({
+          server: spec.serverName,
+          tool: spec.originalName,
+          taskId,
+          execution,
+          render: async (result) => {
+            if (!result.isError) recordOutput(result);
+            const guarded = await guardResult(result);
+            return { content: guarded.content, details: { ...(result.isError ? { error: "tool_error" } : {}), ...guardedMcpDetails(guarded) } };
+          },
+          guard: async (text) => {
+            const guarded = await guardMcpOutput([{ type: "text", text }], outputGuardOptions);
+            return { content: guarded.content, details: guardedMcpDetails(guarded) };
+          },
+        });
+        backgrounded = true;
+        const handle = backgroundTaskHandle(spec.serverName, spec.originalName, taskId, state.proxyToolAvailable?.() === true);
+        return { content: handle.content, details: { server: spec.serverName, tool: spec.originalName, task: handle.task } };
+      }
       const result = spec.executorPath !== undefined ? unwrapExecutorCallResult(spec.executorPath, callResult) : callResult;
       const executorMatches = spec.executorPath !== undefined ? executorUnknownToolMatches(spec.executorPath, callResult) : undefined;
       if (executorMatches) {
@@ -370,14 +415,7 @@ export function createDirectToolExecutor(
       if (!result.isError) recordOutput(result as Record<string, unknown>);
 
       if (result.isError) {
-        const content = resolveMcpResultContent(result as Record<string, unknown>, state.owner?.signal, appendStructuredContent);
-        const outputContent = content.length > 0 ? content : [{ type: "text" as const, text: "(empty result)" }];
-        const guarded = await guardMcpOutput(outputContent, {
-          ...outputGuardOptions,
-          prefix: "Error: ",
-          emptyTextFallback: "Tool execution failed",
-          ...(rawDetails ? { rawMcpResult: result } : {}),
-        });
+        const guarded = await guardResult(result as Record<string, unknown>);
         return {
           content: guarded.content,
           details: { error: "tool_error", server: spec.serverName, ...guardedMcpDetails(guarded) },
@@ -385,15 +423,9 @@ export function createDirectToolExecutor(
         };
       }
 
-      const content = resolveMcpResultContent(result as Record<string, unknown>, state.owner?.signal, appendStructuredContent);
-      const outputContent = content.length > 0 ? content : [{ type: "text" as const, text: "(empty result)" }];
       if (hasUi) {
         const uiSummary = summarizeUiSessionResult(uiSession);
-        const guarded = await guardMcpOutput(outputContent, {
-          ...outputGuardOptions,
-          suffix: `\n\n${uiSummary.message}`,
-          ...(rawDetails ? { rawMcpResult: result } : {}),
-        });
+        const guarded = await guardResult(result as Record<string, unknown>, `\n\n${uiSummary.message}`);
         return {
           content: guarded.content,
           details: {
@@ -408,10 +440,7 @@ export function createDirectToolExecutor(
         };
       }
 
-      const guarded = await guardMcpOutput(outputContent, {
-        ...outputGuardOptions,
-        ...(rawDetails ? { rawMcpResult: result } : {}),
-      });
+      const guarded = await guardResult(result as Record<string, unknown>);
       return {
         content: guarded.content,
         details: { server: spec.serverName, tool: spec.originalName, ...guardedMcpDetails(guarded) },
@@ -465,7 +494,7 @@ export function createDirectToolExecutor(
       if (uiSession?.reused) {
         uiSession.close();
       }
-      state.manager.decrementInFlight(spec.serverName);
+      if (!backgrounded) state.manager.decrementInFlight(spec.serverName);
       state.manager.touch(spec.serverName);
     }
   };

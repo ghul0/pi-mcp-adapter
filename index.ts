@@ -30,6 +30,7 @@ import { cleanupMaterializedBinaryResources } from "./tool-registrar.ts";
 import { publishMcpStatusShutdown } from "./mcp-status.ts";
 import { syncNamespaceProxyTools } from "./namespace-tools.ts";
 import { restoreSessionApprovalState } from "./session-approvals.ts";
+import { pendingTasksFromBranch } from "./task-entries.ts";
 import { createRetryableLoader } from "./lazy-loader.ts";
 import { toToolParameters } from "./tool-parameters.ts";
 import { readPanelOpenKeys } from "./panel-keys.ts";
@@ -106,6 +107,17 @@ function hasExecutorWithoutCatalog(config: McpConfig, cache: MetadataCache | nul
     return entry !== undefined && !entry.executorApps && !isServerDisabled(definition)
       && isExecutorCatalogEntry(entry) && isServerCacheValid(entry, definition);
   });
+}
+
+/** A terminal session that handed off background tasks when it last stopped: its startup resumes them. */
+function hasTasksToResume(ctx: ExtensionContext): boolean {
+  if (!ctx.hasUI || ctx.mode !== "tui") return false;
+  try {
+    return pendingTasksFromBranch(ctx.sessionManager.getBranch(), ctx.sessionManager.getSessionId()).length > 0;
+  } catch {
+    // Initialization reads the session again and logs why it can't.
+    return false;
+  }
 }
 
 export interface McpServerRegistration {
@@ -1480,6 +1492,8 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
       // initializeMcp already warned about each project script tool that trust blocked.
       for (const [name, block] of nextState.blockedScriptTools ?? []) deliveredScriptToolIssues.add(describeBlockedScriptTool(name, block));
       nextState.deliversToScript = deliversToScript;
+      nextState.calledByModel = (toolCallId) => toolCallId !== undefined && !calledByAnotherTool(toolCallId);
+      nextState.proxyToolAvailable = () => proxyToolRegistered && (getActiveToolsIfReady()?.includes("mcp") ?? true);
       nextState.listScriptTools = gatewayScriptTools;
       finalizationGuard = guard;
       finalizationRegistrations = registeredDuringFinalization;
@@ -1721,7 +1735,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     if (state) return;
 
     if (!initPromise) {
-      const deferredSnapshot = getDeferredSessionSnapshot(ctx.cwd);
+      const deferredSnapshot = hasTasksToResume(ctx) ? undefined : getDeferredSessionSnapshot(ctx.cwd);
       if (deferredSnapshot) {
         const { config, cache, enabledServerCount } = deferredSnapshot;
         sessionScriptToolIssues = deferredSnapshot.scriptToolIssues;
@@ -1824,6 +1838,10 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
     initPromise = null;
     initStartedPromise = null;
     clearRetainedInitFailure();
+
+    // Hand background tasks off to the session record first: the owner's abort below would cancel them.
+    // Always, even with none running, since a restore may still be resuming one.
+    await currentState?.backgroundTasks?.handOffForShutdown();
 
     // Abort before awaiting cleanup so delayed initialization cannot touch stale
     // Pi context after session shutdown.
@@ -1955,7 +1973,8 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
   }
 
   /**
-   * Whether a tool other than the model or the adapter's proxies called `toolCallId`, for script tools.
+   * Whether a tool other than the model or the adapter's proxies called `toolCallId`, for script tools
+   * and for keeping such calls out of the background.
    * Pi forms every nested call id as `<parent>/<n>`; under MCP_DIRECT_TOOLS=__none__ there is no caller
    * record, so the id shape is the only signal. That holds for a call whose record is already gone too.
    */
@@ -1989,6 +2008,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
           { value: "reconnect", label: "reconnect — Reconnect servers" },
           { value: "tools", label: "tools — List all tools" },
           { value: "prompts", label: "prompts — List all MCP prompts" },
+          { value: "tasks", label: "tasks — List and stop background MCP tasks" },
           { value: "setup", label: "setup — Configure MCP servers" },
           { value: "jev", label: "jev setup — Configure Jev semantic search" },
           { value: "edit", label: "edit — Edit .mcp.json or the global config" },
@@ -2006,6 +2026,18 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         return "setup".startsWith((argumentPrefix ?? "").trimStart())
           ? [{ value: "jev setup", label: "setup — Configure Jev semantic search" }]
           : null;
+      }
+      if (subcommand === "tasks") {
+        const taskArguments = (argumentPrefix ?? "").trimStart();
+        const stopMatch = taskArguments.match(/^stop\s+(.*)$/);
+        if (!stopMatch) {
+          return "stop".startsWith(taskArguments) ? [{ value: "tasks stop ", label: "stop — Stop a background MCP task" }] : null;
+        }
+        const keyPrefix = stopMatch[1] ?? "";
+        const tasks = (state?.backgroundTasks?.list() ?? [])
+          .filter(task => task.key.startsWith(keyPrefix))
+          .map(task => ({ value: `tasks stop ${task.key}`, label: `${task.key} (${task.tool})` }));
+        return tasks.length > 0 ? tasks : null;
       }
       if (
         (subcommand !== "reconnect" && subcommand !== "logout" && subcommand !== "disable" && subcommand !== "enable" && subcommand !== "token")
@@ -2080,6 +2112,16 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
           break;
         case "prompts":
           await commands.showPrompts(state, commandCtx);
+          break;
+        case "tasks":
+          if (parts.length === 1) {
+            commands.showBackgroundTasks(state, commandCtx);
+          } else if (parts[1] === "stop" && parts.length === 3) {
+            commandOwner?.throwIfInactive();
+            await commands.stopBackgroundTask(state, commandCtx, parts[2]!);
+          } else if (commandCtx.hasUI) {
+            commandCtx.ui?.notify("Usage: /mcp-adapter tasks [stop <server>/<taskId>]", "error");
+          }
           break;
         case "setup": {
           commandOwner?.throwIfInactive();
@@ -2694,6 +2736,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
           : "Action: 'install', 'ui-messages', 'auth-start', or 'auth-complete'" })),
         url: Type.Optional(Type.String({ description: "MCP endpoint URL for action: 'install'" })),
         target: Type.Optional(Type.String({ description: "Install target: 'global' (default) or 'project'" })),
+        cancelTask: Type.Optional(Type.String({ description: "Stop a background MCP task by the <server>/<taskId> its handle names" })),
       }),
       renderResult: renderMcpToolResult,
       ...reachesAllTools,
@@ -2713,6 +2756,7 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
         action?: string;
         url?: string;
         target?: string;
+        cancelTask?: string;
       }, signal: AbortSignal | undefined, _onUpdate: AgentToolUpdateCallback<Record<string, unknown>> | undefined, _ctx: ExtensionContext) {
         let executeOwner = currentOwner;
         const parseArgs = (value: string | Record<string, unknown> | undefined): Record<string, unknown> | undefined => {
@@ -2747,7 +2791,8 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
           || value.server !== undefined
           || value.action !== undefined
           || value.url !== undefined
-          || value.target !== undefined;
+          || value.target !== undefined
+          || value.cancelTask !== undefined;
         if (!hasGatewayMode(params) && params.args !== undefined) {
           throw new Error("Gateway params were nested inside `args`; pass them top-level (for example, mcp({ search: \"...\" }) or mcp({ tool: \"...\", args: {} })).");
         }
@@ -2828,6 +2873,9 @@ function installMcpAdapter(pi: ExtensionAPI, options: McpAdapterOptions) {
           return signal
             ? proxyModes.executeAuthComplete(proxyState, params.server, input, signal)
             : proxyModes.executeAuthComplete(proxyState, params.server, input);
+        }
+        if (params.cancelTask !== undefined) {
+          return proxyModes.executeCancelTask(proxyState, params.cancelTask);
         }
         if (params.tool) {
           // A script tool wins over an MCP tool of the same name; mcp({ tool, server }) reaches the MCP one.
